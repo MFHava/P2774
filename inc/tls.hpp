@@ -89,9 +89,9 @@ namespace p2774 {
 		tls(const Type & val) requires std::is_copy_constructible_v<Type> : init{[val] { return val; }} {} //TODO: constraints sufficient?
 		tls(Type && val) requires std::is_copy_constructible_v<Type> : init{[val{std::move(val)}] { return val; }} {} //TODO: constraints sufficient?
 
-		template<typename... Args>
-		requires std::is_constructible_v<Type, Args...> //TODO: constraints sufficient?
-		tls(Args &&... args) : init{[=] { return Type((args)...); }} {}
+		template<typename Arg, typename... Args>
+		requires std::is_constructible_v<Type, Arg, Args...> && (sizeof...(Args) != 0 || !std::is_same_v<std::decay_t<Arg>, Type>) //TODO: constraints sufficient?
+		tls(Arg && arg, Args &&... args) : init{[=] { return Type(arg, (args)...); }} {}
 
 		template<typename Func>
 		requires std::is_constructible_v<init_func, Func> //TODO: constraints sufficient?
@@ -134,7 +134,6 @@ namespace p2774 {
 
 		//! @name Iteration
 		//! @brief forward iteration support for thread-local storage
-		//! @attention don't invoke concurrently with calls to @ref local
 		//! @{
 		using iterator       = iterator_t<false>;
 		static_assert(std::forward_iterator<iterator>);

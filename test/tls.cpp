@@ -15,3 +15,25 @@ TEST_CASE("WIP") {
 	REQUIRE(flag);
 	REQUIRE(std::get<1>(tls.local()) == false);
 }
+
+namespace {
+	struct noncopyable {
+		noncopyable() =default;
+		noncopyable(const noncopyable &) =delete;
+		noncopyable(noncopyable &&) noexcept =default;
+		auto operator=(const noncopyable &) -> noncopyable & =delete;
+		auto operator=(noncopyable &&) noexcept -> noncopyable & =default;
+		~noncopyable() noexcept =default;
+	};
+}
+
+TEST_CASE("noncopyable", "[tls]") {
+	noncopyable n;
+	p2774::tls<noncopyable> tls{n};//{[] { return noncopyable{}; }};
+	auto [storage, flag]{tls.local()};
+	REQUIRE(flag);
+	REQUIRE(std::get<1>(tls.local()) == false);
+}
+
+//TODO: noncopyable
+
