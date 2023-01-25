@@ -14,7 +14,7 @@
 namespace p2774 {
 	namespace internal {
 		template<typename Type, typename Allocator>
-		class atomic_forward_list final {
+		class atomic_forward_list final { //TODO: fold into tls?
 			struct node final {
 				template<typename... Args>
 				node(Args &&... args) : value{std::forward<Args>(args)...} {}
@@ -48,14 +48,13 @@ namespace p2774 {
 					return *this;
 				}
 
-				auto operator*() const noexcept -> Type & {
+				auto operator*() const noexcept -> std::conditional_t<IsConst, const Type, Type> & {
 					assert(ptr);
-					return *ptr;
+					return ptr->value;
 				}
-				auto operator->() const noexcept -> Type * { return &**this; }
 
 				friend
-				auto operator==(const iterator & self, std::default_sentinel_t) noexcept { return !self->ptr; }
+				auto operator==(const iterator & lhs, const iterator & rhs) noexcept -> bool { return lhs.ptr == rhs.ptr; }
 			};
 
 			atomic_forward_list() noexcept =default;
@@ -65,12 +64,12 @@ namespace p2774 {
 			auto operator=(atomic_forward_list && other) noexcept -> atomic_forward_list & { swap(other); return *this; }
 			~atomic_forward_list() noexcept { clear(); }
 
-			template<typename... Args>
-			requires std::is_constructible_v<Type, Args...>
-			auto emplace_front(Args &&... args) -> Type & {
+			template<typename Arg>
+			requires std::is_constructible_v<Type, Arg>
+			auto prepend(Arg & arg) -> Type & {
 				auto ptr{alloc_traits::allocate(alloc, 1)};
 				try {
-					alloc_traits::construct(alloc, ptr, std::forward<Args>(args)...);
+					alloc_traits::construct(alloc, ptr, arg);
 				} catch(...) {
 					alloc_traits::deallocate(alloc, ptr, 1);
 					throw;
@@ -97,17 +96,12 @@ namespace p2774 {
 				using std::swap;
 				swap(alloc, other.alloc);
 			}
-			friend
-			void swap(atomic_forward_list & lhs, atomic_forward_list & rhs) noexcept { lhs.swap(rhs); }
 
 			auto begin() const noexcept -> iterator<true> { return head.load(); }
 			auto begin()       noexcept -> iterator<false> { return head.load(); }
-			auto cbegin() const noexcept -> iterator<true> { return begin(); }
 
-			static
-			auto end() noexcept -> std::default_sentinel_t { return {}; }
-			static
-			auto cend() noexcept -> std::default_sentinel_t { return end(); }
+			auto end() const noexcept -> iterator<true> { return {}; }
+			auto end()       noexcept -> iterator<false> { return {}; }
 		};
 	}
 
@@ -117,13 +111,19 @@ namespace p2774 {
 	template<typename Type, typename Allocator = std::allocator<Type>>
 	requires (!std::is_const_v<Type> && !std::is_reference_v<Type>) //TODO: constraints sufficient?
 	class tls final {
-		static_assert(std::is_copy_constructible_v<Type>);
+		using init_func = std::move_only_function<Type() const>;
 
-		using node_type = std::pair<std::thread::id, Type>;
+		struct node_type final {
+			node_type(const init_func & init) : value{init()} {}
+
+			Type value;
+			const std::thread::id owner{std::this_thread::get_id()};
+		};
+
 		using list_type = internal::atomic_forward_list<node_type, typename std::allocator_traits<Allocator>::template rebind_alloc<node_type>>;
 
 		list_type list;
-		std::move_only_function<Type()> init;
+		init_func init;
 
 		template<bool IsConst>
 		class iterator_t final {
@@ -134,7 +134,7 @@ namespace p2774 {
 
 			iterator_t(iterator it) noexcept : it{it} {}
 		public:
-			using iterator_t_category = std::forward_iterator_tag;
+			using iterator_category = std::forward_iterator_tag;
 			using value_type        = Type;
 			using difference_type   = std::ptrdiff_t;
 			using pointer           = std::conditional_t<IsConst, const Type, Type> *;
@@ -152,23 +152,23 @@ namespace p2774 {
 				return tmp;
 			}
 
-			auto operator*() const noexcept -> reference { return it->second; }
+			auto operator*() const noexcept -> reference { return (*it).value; }
 			auto operator->() const noexcept -> pointer { return &**this; }
 
 			friend
-			auto operator==(const iterator_t & it, std::default_sentinel_t s) noexcept { return it == s; }
+			auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs == rhs; }
 		};
 	public:
 		tls() requires std::is_default_constructible_v<Type> : init{[] { return Type{}; }} {} //TODO: constraints sufficient?
-		tls(const Type & val) : init{[val] { return val; }} {} //TODO: constraints sufficient?
-		tls(Type && val) : init{[val{std::move(val)}] { return val; }} {} //TODO: constraints sufficient?
+		tls(const Type & val) requires std::is_copy_constructible_v<Type> : init{[val] { return val; }} {} //TODO: constraints sufficient?
+		tls(Type && val) requires std::is_copy_constructible_v<Type> : init{[val{std::move(val)}] { return val; }} {} //TODO: constraints sufficient?
 
 		template<typename... Args>
 		requires std::is_constructible_v<Type, Args...> //TODO: constraints sufficient?
-		tls(Args &&... args) : init{[args{std::move(args)...}] { return Type(args...); }} {}
+		tls(Args &&... args) : init{[=] { return Type((args)...); }} {}
 
 		template<typename Func>
-		requires std::is_convertible_v<Type, std::invoke_result_t<Func>> //TODO: constraints sufficient?
+		requires std::is_constructible_v<init_func, Func> //TODO: constraints sufficient?
 		tls(Func f) : init{std::move(f)} {}
 
 		tls(const tls &) =delete;
@@ -187,9 +187,10 @@ namespace p2774 {
 		//! @note allocates thread-local storage on first call from thread
 		[[nodiscard]]
 		auto local() -> std::tuple<Type &, bool> {
-			const auto id{std::this_thread::get_id()};
-			if(const auto it{std::find_if(std::begin(list), std::end(list), [&](const auto & p) { return p.first == id; })}; it != std::end(list)) return {it->second, false};
-			return {list.emplace_front(id, init()).second, true};
+			for(auto & node : list)
+				if(node.owner == std::this_thread::get_id())
+					return {node.value, false};
+			return {list.prepend(init).value, true};
 		}
 
 		//! @brief clears all thread-local storage
@@ -204,12 +205,14 @@ namespace p2774 {
 		static_assert(std::forward_iterator<iterator>);
 		using const_iterator = iterator_t<true>;
 		static_assert(std::forward_iterator<const_iterator>);
+
 		auto begin() const noexcept -> const_iterator { return list.begin(); }
-		auto begin()       noexcept ->       iterator { return list.begin(); }
+		auto begin()       noexcept -> iterator { return list.begin(); }
+		auto end() const noexcept -> const_iterator { return list.end(); }
+		auto end()       noexcept -> iterator { return list.end(); }
+
 		auto cbegin() const noexcept -> const_iterator { return begin(); }
-		auto end() const noexcept -> std::default_sentinel_t { return list.end(); }
-		auto end()       noexcept -> std::default_sentinel_t { return list.end(); }
-		auto cend() const noexcept -> std::default_sentinel_t { return end(); }
+		auto cend() const noexcept -> const_iterator { return end(); }
 		//! @}
 	};
 }
