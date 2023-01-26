@@ -7,33 +7,73 @@
 #include <catch.hpp>
 #include <tls.hpp>
 
-//TODO
-TEST_CASE("WIP") {
-	p2774::tls<int> tls{[] { return 10; }};
-	auto [storage, flag]{tls.local()};
-	REQUIRE(storage == 10);
-	REQUIRE(flag);
-	REQUIRE(std::get<1>(tls.local()) == false);
-}
-
 namespace {
-	struct noncopyable {
-		noncopyable() =default;
-		noncopyable(const noncopyable &) =delete;
-		noncopyable(noncopyable &&) noexcept =default;
-		auto operator=(const noncopyable &) -> noncopyable & =delete;
-		auto operator=(noncopyable &&) noexcept -> noncopyable & =default;
-		~noncopyable() noexcept =default;
+	struct no_default_ctor {
+		no_default_ctor(int) {}
+	};
+
+	struct move_only {
+		move_only() =default;
+		move_only(const move_only &) =delete;
+		move_only(move_only &&) noexcept =default;
+		auto operator=(const move_only &) -> move_only & =delete;
+		auto operator=(move_only &&) noexcept -> move_only & =default;
+		~move_only() noexcept =default;
 	};
 }
 
-TEST_CASE("noncopyable", "[tls]") {
-	noncopyable n;
-	p2774::tls<noncopyable> tls{n};//{[] { return noncopyable{}; }};
-	auto [storage, flag]{tls.local()};
-	REQUIRE(flag);
-	REQUIRE(std::get<1>(tls.local()) == false);
+
+TEST_CASE("tls default ctor", "[tls] [ctor] [default]") {
+	p2774::tls<int> tls0;
+	p2774::tls<move_only> tls1;
+	static_assert(!std::is_constructible_v<p2774::tls<no_default_ctor>>);
 }
 
-//TODO: noncopyable
+TEST_CASE("tls custom ctor copy", "[tls] [ctor] [custom] [copy]") {
+	//TODO: tls(const Type &) requires std::is_copy_constructible_v<Type>;
+}
 
+TEST_CASE("tls custom ctor move", "[tls] [ctor] [custom] [move]") {
+	//TODO: tls(Type &&) requires std::is_copy_constructible_v<Type>;
+}
+
+TEST_CASE("tls custom ctor args", "[tls] [ctor] [custom] [args]") {
+	//TODO: template<typename... Args> requires (std::is_constructible_v<Type, Args...> && sizeof...(Args) >= 1 && !std::is_same_v<Type, std::decay_t<first<Args...>>> && !std::is_same_v<tls, std::decay_t<first<Args...>>>) tls(Args &&...)
+}
+
+TEST_CASE("tls custom ctor functor", "[tls] [ctor] [custom] [functor]") {
+	//TODO: template<typename Func> requires std::is_constructible_v<init_func, Func>  tls(Func);
+}
+
+TEST_CASE("tls copy ctor", "[tls] [ctor] [copy]") {
+	//TODO: tls(const tls &) requires std::is_copy_constructible_v<Type>;
+}
+
+TEST_CASE("tls move move", "[tls] [ctor] [move]") {
+	//TODO: tls(tls &&) noexcept;
+}
+
+TEST_CASE("tls copy assign", "[tls] [assign] [copy]") {
+	//TODO: auto operator=(const tls &) -> tls & requires std::is_copy_constructible_v<Type>;
+}
+
+TEST_CASE("tls move assign", "[tls] [assign] [move]") {
+	//TODO: auto operator=(tls &&) noexcept -> tls &;
+}
+
+TEST_CASE("tls dtor", "[tls] [dtor]") {
+	//TODO: ~tls() noexcept;
+}
+
+TEST_CASE("tls local", "[tls]") {
+	//TODO: [[nodiscard]] auto local() -> std::tuple<Type &, bool>
+}
+
+TEST_CASE("tls clear", "[tls]") {
+	//TODO: void clear() noexcept;
+}
+
+TEST_CASE("tls iterators", "[tls]") {
+	//TODO: auto begin()       noexcept -> iterator;
+	//TODO: auto end()       noexcept -> iterator;
+}

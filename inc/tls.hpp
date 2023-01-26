@@ -84,14 +84,17 @@ namespace p2774 {
 			}
 			return ptr;
 		}
+
+		template<typename T, typename... Ts>
+		using first = T;
 	public:
 		tls() requires std::is_default_constructible_v<Type> : init{[] { return Type{}; }} {} //TODO: constraints sufficient?
-		tls(const Type & val) requires std::is_copy_constructible_v<Type> : init{[val] { return val; }} {} //TODO: constraints sufficient?
+		tls(const Type & val) requires std::is_copy_constructible_v<Type> : init{[=] { return val; }} {} //TODO: constraints sufficient?
 		tls(Type && val) requires std::is_copy_constructible_v<Type> : init{[val{std::move(val)}] { return val; }} {} //TODO: constraints sufficient?
 
-		template<typename Arg, typename... Args>
-		requires std::is_constructible_v<Type, Arg, Args...> && (sizeof...(Args) != 0 || !std::is_same_v<std::decay_t<Arg>, Type>) //TODO: constraints sufficient?
-		tls(Arg && arg, Args &&... args) : init{[=] { return Type(arg, (args)...); }} {}
+		template<typename... Args>
+		requires (std::is_constructible_v<Type, Args...> && sizeof...(Args) >= 1 && !std::is_same_v<Type, std::decay_t<first<Args...>>> && !std::is_same_v<tls, std::decay_t<first<Args...>>>) //TODO: constraints sufficient?
+		tls(Args &&... args) : init{[=] { return Type((args)...); }} {}
 
 		template<typename Func>
 		requires std::is_constructible_v<init_func, Func> //TODO: constraints sufficient?
