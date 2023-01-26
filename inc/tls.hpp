@@ -19,10 +19,11 @@ namespace p2774 {
 	template<typename Type, typename Allocator = std::allocator<Type>>
 	requires (!std::is_const_v<Type> && !std::is_reference_v<Type>) //TODO: constraints sufficient?
 	class tls final {
-		using init_func = std::move_only_function<Type() const>;
+		using init_func = std::function<Type()>; //TODO: use std::copyable_function<Type() const> instead after P2548 has been adopted
 
 		struct node final {
 			node(const init_func & init) : value{init()} {}
+			node(const node & other) requires std::is_copy_constructible_v<Type> : value{value}, owner{other.owner} {}
 
 			Type value;
 			const std::thread::id owner{std::this_thread::get_id()};
@@ -72,17 +73,16 @@ namespace p2774 {
 			auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs.ptr == rhs.ptr; }
 		};
 
-		auto emplace_front() -> Type & {
+		template<typename Arg>
+		auto new_node(Arg && arg) -> node * {
 			auto ptr{alloc_traits::allocate(alloc, 1)};
 			try {
-				alloc_traits::construct(alloc, ptr, init);
+				alloc_traits::construct(alloc, ptr, std::forward<Arg>(arg));
 			} catch(...) {
 				alloc_traits::deallocate(alloc, ptr, 1);
 				throw;
 			}
-			ptr->next = head.load();
-			while(!head.compare_exchange_weak(ptr->next, ptr));
-			return ptr->value;
+			return ptr;
 		}
 	public:
 		tls() requires std::is_default_constructible_v<Type> : init{[] { return Type{}; }} {} //TODO: constraints sufficient?
@@ -97,16 +97,39 @@ namespace p2774 {
 		requires std::is_constructible_v<init_func, Func> //TODO: constraints sufficient?
 		tls(Func f) : init{std::move(f)} {}
 
-		tls(const tls &) =delete; //TODO: needed?
-		tls(tls && other) noexcept : head{other.head.exchange(nullptr)}, init{std::move(other.init)}, alloc{std::move(other.alloc)} {} //NOTE: other will be in valid but unspecified state and can only be destroyed
-		auto operator=(const tls &) -> tls & =delete; //TODO: needed?
-		auto operator=(tls && other) noexcept -> tls & {
-			head.store(other.head.exchange(head.load())); //non-atomic swap of atomics
-			using std::swap;
-			swap(alloc, other.alloc);
-			swap(init, other.init);
+		tls(const tls & other) requires std::is_copy_constructible_v<Type> : alloc{other.alloc}, init{other.init} {
+			try {
+				for(auto ptr{other.head.load()}, * prev{nullptr}; ptr; ptr = ptr->next) {
+					auto node{new_node(*ptr)};
+					if(!prev) head = prev = node;
+					else {
+						prev->next = node;
+						prev = node;
+					}
+				}
+			} catch(...) {
+				clear();
+				throw;
+			}
+		}
+
+		tls(tls && other) noexcept : head{other.head.exchange(nullptr)}, init{std::move(other.init)}, alloc{std::move(other.alloc)} {} //! @attention other will be in valid but unspecified state and can only be destroyed
+
+		auto operator=(const tls & other) -> tls & requires std::is_copy_constructible_v<Type> {
+			if(this != other) [[likely]] *this = tls{other};
 			return *this;
 		}
+
+		auto operator=(tls && other) noexcept -> tls & { //! @attention other will be in valid but unspecified state and can only be destroyed
+			if(this != &other) [[likely]] {
+				clear();
+				head = other.head.exchange(nullptr);
+				alloc = std::move(other.alloc);
+				init = std::move(other.init);
+			}
+			return *this;
+		}
+
 		~tls() noexcept { clear(); }
 
 		//! @brief get access to thread-local storage
@@ -118,7 +141,11 @@ namespace p2774 {
 			for(auto ptr{head.load()}; ptr; ptr = ptr->next)
 				if(ptr->owner == std::this_thread::get_id())
 					return {ptr->value, false};
-			return {emplace_front(), true};
+
+			auto ptr{new_node(init)};
+			ptr->next = head.load();
+			while(!head.compare_exchange_weak(ptr->next, ptr));
+			return {ptr->value, true};
 		}
 
 		//! @brief clears all thread-local storage
