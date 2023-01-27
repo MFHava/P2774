@@ -69,15 +69,21 @@ namespace p2774 {
 			auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs.ptr == rhs.ptr; }
 		};
 
+		template<typename... Ts>
+		struct first;
+
 		template<typename T, typename... Ts>
-		using first = T;
+		struct first<T, Ts...> { using type = T; };
+
+		template<typename... Ts>
+		using first_t = typename first<Ts...>::type;
 	public:
 		tls() requires std::is_default_constructible_v<Type> : init{[] { return Type{}; }} {} //TODO: constraints sufficient?
 		tls(const Type & val) requires std::is_copy_constructible_v<Type> : init{[=] { return val; }} {} //TODO: constraints sufficient?
 		tls(Type && val) requires std::is_copy_constructible_v<Type> : init{[val{std::move(val)}] { return val; }} {} //TODO: constraints sufficient?
 
 		template<typename... Args>
-		requires (std::is_constructible_v<Type, Args...> && sizeof...(Args) >= 1 && !std::is_same_v<Type, std::decay_t<first<Args...>>>) //TODO: constraints sufficient?
+		requires (std::is_constructible_v<Type, Args...> && sizeof...(Args) >= 1 && !std::is_same_v<Type, std::decay_t<first_t<Args...>>>) //TODO: constraints sufficient?
 		tls(Args &&... args) : init{[=] { return Type((args)...); }} {}
 
 		template<typename Func>
