@@ -16,7 +16,7 @@ namespace p2774 {
 	//! @brief scoped thread-local storage
 	//! @tparam Type type of thread-local storage
 	template<typename Type>
-	requires (!std::is_const_v<Type> && !std::is_reference_v<Type>) //TODO: constraints sufficient?
+	requires (!std::is_const_v<Type> && !std::is_reference_v<Type>)
 	class tls final {
 		using init_func = std::function<Type()>; //TODO: use std::copyable_function<Type() const> instead after P2548 has been adopted
 
@@ -78,16 +78,16 @@ namespace p2774 {
 		template<typename... Ts>
 		using first_t = typename first<Ts...>::type;
 	public:
-		tls() requires std::is_default_constructible_v<Type> : init{[] { return Type{}; }} {} //TODO: constraints sufficient?
-		tls(const Type & val) requires std::is_copy_constructible_v<Type> : init{[=] { return val; }} {} //TODO: constraints sufficient?
-		tls(Type && val) requires std::is_copy_constructible_v<Type> : init{[val{std::move(val)}] { return val; }} {} //TODO: constraints sufficient?
+		tls() requires std::is_default_constructible_v<Type> : init{[] { return Type{}; }} {}
+		tls(const Type & val) requires std::is_copy_constructible_v<Type> : init{[=] { return val; }} {}
+		tls(Type && val) requires std::is_copy_constructible_v<Type> : init{[val{std::move(val)}] { return val; }} {}
 
 		template<typename... Args>
-		requires (std::is_constructible_v<Type, Args...> && sizeof...(Args) >= 1 && !std::is_same_v<Type, std::decay_t<first_t<Args...>>>) //TODO: constraints sufficient?
+		requires (std::is_constructible_v<Type, Args...> && sizeof...(Args) >= 1 && !std::is_same_v<Type, std::decay_t<first_t<Args...>>>)
 		tls(Args &&... args) : init{[=] { return Type((args)...); }} {}
 
 		template<typename Func>
-		requires std::is_same_v<Type, std::invoke_result_t<Func>> //TODO: constraints sufficient?
+		requires std::is_same_v<Type, std::invoke_result_t<Func>>
 		tls(Func f) : init{std::move(f)} {}
 
 		tls(const tls & other) requires std::is_copy_constructible_v<Type> : init{other.init} {
