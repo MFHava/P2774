@@ -68,23 +68,10 @@ namespace p2774 {
 			friend
 			auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs.ptr == rhs.ptr; }
 		};
-
-		template<typename... Ts>
-		struct first;
-
-		template<typename T, typename... Ts>
-		struct first<T, Ts...> { using type = T; };
-
-		template<typename... Ts>
-		using first_t = typename first<Ts...>::type;
 	public:
-		tls() requires std::is_default_constructible_v<Type> : init{[] { return Type{}; }} {}
-		tls(const Type & val) requires std::is_copy_constructible_v<Type> : init{[=] { return val; }} {}
-		tls(Type && val) requires std::is_copy_constructible_v<Type> : init{[val{std::move(val)}] { return val; }} {}
-
 		template<typename... Args>
-		requires (std::is_constructible_v<Type, Args...> && sizeof...(Args) >= 1 && !std::is_same_v<Type, std::decay_t<first_t<Args...>>>)
-		tls(Args &&... args) : init{[=] { return Type((args)...); }} {}
+		requires (std::is_constructible_v<Type, Args...> && (std::is_copy_constructible_v<Args> && ...))
+		tls(Args &&... args) : init{[=] { return Type(args...); }} {}
 
 		template<typename Func>
 		requires std::is_same_v<Type, std::invoke_result_t<Func>>
