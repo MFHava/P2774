@@ -15,8 +15,7 @@
 namespace p2774 {
 	//! @brief scoped thread-local storage
 	//! @tparam Type type of thread-local storage
-	//! @tparam Allocator allocator to use when allocating the thread-local storage
-	template<typename Type, typename Allocator = std::allocator<Type>>
+	template<typename Type>
 	requires (!std::is_const_v<Type> && !std::is_reference_v<Type>) //TODO: constraints sufficient?
 	class tls final {
 		using init_func = std::function<Type()>; //TODO: use std::copyable_function<Type() const> instead after P2548 has been adopted
@@ -30,10 +29,7 @@ namespace p2774 {
 			node * next{nullptr};
 		};
 
-		using alloc_traits = typename std::allocator_traits<Allocator>::template rebind_traits<node>;
-
 		std::atomic<node *> head{nullptr}; //atomic_forward_list for simplicity
-		[[no_unique_address]] typename alloc_traits::allocator_type alloc;
 		init_func init;
 
 		template<bool IsConst>
@@ -73,18 +69,6 @@ namespace p2774 {
 			auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs.ptr == rhs.ptr; }
 		};
 
-		template<typename Arg>
-		auto new_node(Arg && arg) -> node * {
-			auto ptr{alloc_traits::allocate(alloc, 1)};
-			try {
-				alloc_traits::construct(alloc, ptr, std::forward<Arg>(arg));
-			} catch(...) {
-				alloc_traits::deallocate(alloc, ptr, 1);
-				throw;
-			}
-			return ptr;
-		}
-
 		template<typename T, typename... Ts>
 		using first = T;
 	public:
@@ -100,14 +84,14 @@ namespace p2774 {
 		requires std::is_same_v<Type, std::invoke_result_t<Func>> //TODO: constraints sufficient?
 		tls(Func f) : init{std::move(f)} {}
 
-		tls(const tls & other) requires std::is_copy_constructible_v<Type> : alloc{other.alloc}, init{other.init} {
+		tls(const tls & other) requires std::is_copy_constructible_v<Type> : init{other.init} {
 			try {
 				for(node * ptr{other.head.load()}, * prev{nullptr}; ptr; ptr = ptr->next) {
-					auto node{new_node(*ptr)};
-					if(!prev) head = prev = node;
+					auto n{new node(*ptr)};
+					if(!prev) head = prev = n;
 					else {
-						prev->next = node;
-						prev = node;
+						prev->next = n;
+						prev = n;
 					}
 				}
 			} catch(...) {
@@ -116,7 +100,7 @@ namespace p2774 {
 			}
 		}
 
-		tls(tls && other) noexcept : head{other.head.exchange(nullptr)}, init{std::move(other.init)}, alloc{std::move(other.alloc)} {} //! @attention other will be in valid but unspecified state and can only be destroyed
+		tls(tls && other) noexcept : head{other.head.exchange(nullptr)}, init{std::move(other.init)} {} //! @attention other will be in valid but unspecified state and can only be destroyed
 
 		auto operator=(const tls & other) -> tls & requires std::is_copy_constructible_v<Type> {
 			if(this != &other) [[likely]] *this = tls{other};
@@ -127,7 +111,6 @@ namespace p2774 {
 			if(this != &other) [[likely]] {
 				clear();
 				head = other.head.exchange(nullptr);
-				alloc = std::move(other.alloc);
 				init = std::move(other.init);
 			}
 			return *this;
@@ -137,7 +120,7 @@ namespace p2774 {
 
 		//! @brief get access to thread-local storage
 		//! @returns tuple with reference to thread-local storage and a bool flag specifying whether the element was newly allocated (=true)
-		//! @throws any exception thrown by the allocator, or the constructor of Type
+		//! @throws any exception thrown by the respective constructor of Type
 		//! @note allocates thread-local storage on first call from thread
 		[[nodiscard]]
 		auto local() -> std::tuple<Type &, bool> {
@@ -145,7 +128,7 @@ namespace p2774 {
 				if(ptr->owner == std::this_thread::get_id())
 					return {ptr->value, false};
 
-			auto ptr{new_node(init)};
+			auto ptr{new node(init)};
 			ptr->next = head.load();
 			while(!head.compare_exchange_weak(ptr->next, ptr));
 			return {ptr->value, true};
@@ -157,8 +140,7 @@ namespace p2774 {
 			for(auto ptr{head.exchange(nullptr)}; ptr;) {
 				const auto old{ptr};
 				ptr = ptr->next;
-				alloc_traits::destroy(alloc, old);
-				alloc_traits::deallocate(alloc, old, 1);
+				delete old;
 			}
 		}
 
