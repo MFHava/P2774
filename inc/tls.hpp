@@ -108,12 +108,7 @@ namespace p2774 {
 
 		tls(tls && other) noexcept : head{other.head.exchange(nullptr)}, init{std::move(other.init)} {} //! @attention other will be in valid but unspecified state and can only be destroyed
 
-		auto operator=(const tls & other) -> tls & requires std::is_copy_constructible_v<Type> {
-			if(this != &other) [[likely]] *this = tls{other};
-			return *this;
-		}
-
-		auto operator=(tls && other) noexcept -> tls & { //! @attention other will be in valid but unspecified state and can only be destroyed
+		auto operator=(tls other) noexcept -> tls & {
 			if(this != &other) [[likely]] {
 				clear();
 				head = other.head.exchange(nullptr);
