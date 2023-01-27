@@ -23,7 +23,7 @@ namespace p2774 {
 
 		struct node final {
 			node(const init_func & init) : value{init()} {}
-			node(const node & other) requires std::is_copy_constructible_v<Type> : value{value}, owner{other.owner} {}
+			node(const node & other) requires std::is_copy_constructible_v<Type> : value{other.value}, owner{other.owner} {}
 
 			Type value;
 			const std::thread::id owner{std::this_thread::get_id()};
@@ -54,7 +54,7 @@ namespace p2774 {
 
 			auto operator++() noexcept -> iterator_t & {
 				assert(ptr);
-				++ptr;
+				ptr = ptr->next;
 				return *this;
 			}
 			auto operator++(int) noexcept -> iterator_t {
@@ -93,16 +93,16 @@ namespace p2774 {
 		tls(Type && val) requires std::is_copy_constructible_v<Type> : init{[val{std::move(val)}] { return val; }} {} //TODO: constraints sufficient?
 
 		template<typename... Args>
-		requires (std::is_constructible_v<Type, Args...> && sizeof...(Args) >= 1 && !std::is_same_v<Type, std::decay_t<first<Args...>>> && !std::is_same_v<tls, std::decay_t<first<Args...>>>) //TODO: constraints sufficient?
+		requires (std::is_constructible_v<Type, Args...> && sizeof...(Args) >= 1 && !std::is_same_v<Type, std::decay_t<first<Args...>>>) //TODO: constraints sufficient?
 		tls(Args &&... args) : init{[=] { return Type((args)...); }} {}
 
 		template<typename Func>
-		requires std::is_constructible_v<init_func, Func> //TODO: constraints sufficient?
+		requires std::is_same_v<Type, std::invoke_result_t<Func>> //TODO: constraints sufficient?
 		tls(Func f) : init{std::move(f)} {}
 
 		tls(const tls & other) requires std::is_copy_constructible_v<Type> : alloc{other.alloc}, init{other.init} {
 			try {
-				for(auto ptr{other.head.load()}, * prev{nullptr}; ptr; ptr = ptr->next) {
+				for(node * ptr{other.head.load()}, * prev{nullptr}; ptr; ptr = ptr->next) {
 					auto node{new_node(*ptr)};
 					if(!prev) head = prev = node;
 					else {
@@ -119,7 +119,7 @@ namespace p2774 {
 		tls(tls && other) noexcept : head{other.head.exchange(nullptr)}, init{std::move(other.init)}, alloc{std::move(other.alloc)} {} //! @attention other will be in valid but unspecified state and can only be destroyed
 
 		auto operator=(const tls & other) -> tls & requires std::is_copy_constructible_v<Type> {
-			if(this != other) [[likely]] *this = tls{other};
+			if(this != &other) [[likely]] *this = tls{other};
 			return *this;
 		}
 
@@ -137,7 +137,7 @@ namespace p2774 {
 
 		//! @brief get access to thread-local storage
 		//! @returns tuple with reference to thread-local storage and a bool flag specifying whether the element was newly allocated (=true)
-		//! @throws any exception thrown by the allocator, or constructor of Type
+		//! @throws any exception thrown by the allocator, or the constructor of Type
 		//! @note allocates thread-local storage on first call from thread
 		[[nodiscard]]
 		auto local() -> std::tuple<Type &, bool> {
