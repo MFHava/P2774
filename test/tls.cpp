@@ -69,28 +69,6 @@ TEST_CASE("tls custom ctor functor", "[tls] [ctor] [custom] [functor]") {
 	(void)tls2.local();
 }
 
-TEST_CASE("tls copy", "[tls] [copy]") {
-	constexpr auto count{10};
-
-	std::vector<std::jthread> threads;
-
-	p2774::tls<int> tls0{0};
-	for(auto i{0}; i < count; ++i) threads.emplace_back([&, i] { std::get<0>(tls0.local()) = i; });
-	threads.clear();
-	REQUIRE(std::distance(tls0.begin(), tls0.end()) == count);
-
-	const auto tls1{tls0};
-	REQUIRE(std::equal(tls0.begin(), tls0.end(), tls1.begin(), tls1.end()));
-
-	p2774::tls<int> tls2;
-	tls2 = tls1;
-	REQUIRE(std::equal(tls0.begin(), tls0.end(), tls2.begin(), tls2.end()));
-
-
-	static_assert(!std::is_copy_constructible_v<p2774::tls<move_only>>);
-	static_assert(!std::is_copy_assignable_v<p2774::tls<move_only>>);
-}
-
 TEST_CASE("tls move", "[tls] [move]") {
 	constexpr auto count{10};
 

@@ -18,7 +18,7 @@ namespace p2774 {
 	template<typename Type>
 	requires (!std::is_const_v<Type> && !std::is_reference_v<Type>)
 	class tls final {
-		using init_func = std::function<Type()>; //TODO: use std::copyable_function<Type() const> instead after P2548 has been adopted
+		using init_func = std::move_only_function<Type() const>; //TODO: use copyable_function if LEWG decides on copy-ability
 
 		struct node final {
 			node(const init_func & init) : value{init()} {}
@@ -77,22 +77,7 @@ namespace p2774 {
 		requires std::is_same_v<Type, std::invoke_result_t<Func>>
 		tls(Func f) : init{std::move(f)} {}
 
-		tls(const tls & other) requires std::is_copy_constructible_v<Type> : init{other.init} {
-			try {
-				for(node * ptr{other.head.load()}, * prev{nullptr}; ptr; ptr = ptr->next) {
-					auto n{new node(*ptr)};
-					if(!prev) head = prev = n;
-					else {
-						prev->next = n;
-						prev = n;
-					}
-				}
-			} catch(...) {
-				clear();
-				throw;
-			}
-		}
-
+		tls(const tls &) =delete;
 		tls(tls && other) noexcept : head{other.head.exchange(nullptr)}, init{std::move(other.init)} {} //! @attention other will be in valid but unspecified state and can only be destroyed
 
 		auto operator=(tls other) noexcept -> tls & {
