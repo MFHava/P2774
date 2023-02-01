@@ -77,7 +77,7 @@ TEST_CASE("tls move", "[tls] [move]") {
 	p2774::tls<int> tls0{0};
 	for(auto i{0}; i < count; ++i) threads.emplace_back([&, i] { std::get<0>(tls0.local()) = i; });
 	threads.clear();
-	REQUIRE(std::distance(tls0.begin(), tls0.end()) == count);
+	REQUIRE(std::distance(tls0.cbegin(), tls0.cend()) == count);
 
 	auto tls1{std::move(tls0)};
 	REQUIRE(std::distance(tls0.begin(), tls0.end()) == 0);
