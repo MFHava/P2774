@@ -74,7 +74,7 @@ namespace p2774 {
 		tls(Args &&... args) : init{[=] { return Type(args...); }} {}
 
 		template<typename Func>
-		requires std::is_same_v<Type, std::invoke_result_t<Func>>
+		requires std::is_convertible_v<Type, std::invoke_result_t<Func>>
 		tls(Func f) : init{std::move(f)} {}
 
 		tls(const tls &) =delete;
