@@ -89,6 +89,24 @@ TEST_CASE("tls move", "[tls] [move]") {
 	REQUIRE(std::distance(tls2.begin(), tls2.end()) == count);
 }
 
+TEST_CASE("tls copy", "[tls] [copy]") {
+	static_assert(!std::is_copy_constructible_v<p2774::tls<move_only>>);
+
+	constexpr auto count{10};
+
+	std::vector<std::jthread> threads;
+
+	p2774::tls<int> tls0{0};
+	for(auto i{0}; i < count; ++i) threads.emplace_back([&, i] { std::get<0>(tls0.local()) = i; });
+	threads.clear();
+	REQUIRE(std::distance(tls0.cbegin(), tls0.cend()) == count);
+
+	auto tls1{tls0};
+	REQUIRE(std::distance(tls0.begin(), tls0.end()) == count);
+	REQUIRE(std::distance(tls1.begin(), tls1.end()) == count);
+	REQUIRE(std::equal(tls0.begin(), tls0.end(), tls1.begin(), tls1.end()));
+}
+
 TEST_CASE("tls clear", "[tls]") {
 	p2774::tls<int> tls;
 	REQUIRE(std::get<1>(tls.local()));

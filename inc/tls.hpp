@@ -20,7 +20,7 @@ namespace p2774 {
 	template<typename Type>
 	requires (!std::is_const_v<Type> && !std::is_reference_v<Type>)
 	class tls final {
-		using init_func = std::move_only_function<Type() const>; //TODO: use copyable_function if LEWG decides on copy-ability
+		using init_func = std::function<Type()>; //TODO: copyable_function after P2548 is adopted
 
 		struct node final {
 			node(const init_func & init) : value{init()} {}
@@ -147,7 +147,36 @@ namespace p2774 {
 		requires (std::is_constructible_v<Type, Args...> && (std::is_copy_constructible_v<Args> && ...))
 		tls(Args &&... args) : tls{[=] { return Type(args...); }} {}
 
-		tls(const tls &) =delete;
+		tls(const tls & other) requires std::is_copy_constructible_v<Type> : init{other.init} {
+#ifdef TLS_IMPL_HASHMAP
+			if(!other.head) return;
+			head = new std::atomic<node *>[bucket_count]{nullptr};
+
+			for(auto i{0}; i < bucket_count; ++i) {
+				node * prev{nullptr};
+				for(auto ptr{other.head[i].load()}; ptr; ptr = ptr->next) {
+					auto tmp{new node{*ptr}};
+					if(prev) {
+						prev->next = tmp;
+						prev = tmp;
+					} else {
+						head[i] = prev = tmp;
+					}
+				}
+			}
+#else
+			node * prev{nullptr};
+			for(auto ptr{other.head.load()}; ptr; ptr = ptr->next) {
+				auto tmp{new node{*ptr}};
+				if(prev) {
+					prev->next = tmp;
+					prev = tmp;
+				} else {
+					head = prev = tmp;
+				}
+			}
+#endif
+		}
 		tls(tls && other) noexcept : head{
 #ifndef TLS_IMPL_HASHMAP
 			other.head.exchange(nullptr)
