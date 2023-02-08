@@ -235,7 +235,7 @@ namespace p2774 {
 	//! @brief scoped thread-local storage
 	//! @tparam Type type of thread-local storage
 	template<typename Type>
-	requires (!std::is_const_v<Type> && !std::is_reference_v<Type>)
+	requires (std::is_same_v<Type, std::remove_cvref_t<Type>>)
 	class tls final {
 #ifndef TLS_IMPL_HASHMAP
 		using storage_t = internal::atomic_forward_list<Type>;
