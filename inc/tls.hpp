@@ -8,6 +8,7 @@
 #include <tuple>
 #include <atomic>
 #include <thread>
+#include <vector>
 #include <concepts>
 #include <functional>
 #include <type_traits>
@@ -132,7 +133,7 @@ namespace p2774 {
 
 		template<typename T>
 		class atomic_unordered_map final {
-			atomic_forward_list<T> * buckets{nullptr};
+			std::vector<atomic_forward_list<T>> buckets;
 		public:
 			template<bool IsConst>
 			class iterator_t final {
@@ -185,48 +186,30 @@ namespace p2774 {
 				auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs.it == rhs.it; }
 			};
 
-			atomic_unordered_map() noexcept : buckets{new atomic_forward_list<T>[bucket_count]} {}
-			atomic_unordered_map(const atomic_unordered_map & other) requires std::is_copy_constructible_v<T> {
-				if(!other.buckets) return;
-				buckets = new atomic_forward_list<T>[bucket_count];
-				try {
-					for(std::size_t i{0}; i < bucket_count; ++i) buckets[i] = other.buckets[i];
-				} catch(...) {
-					clear();
-					delete[] buckets;
-					throw;
-				}
-
-			}
-			atomic_unordered_map(atomic_unordered_map && other) noexcept : buckets{std::exchange(other.buckets, nullptr)} {} //! @attention moved from object can only be destroyed!
+			atomic_unordered_map() noexcept : buckets(bucket_count) {}
+			atomic_unordered_map(const atomic_unordered_map & other) requires std::is_copy_constructible_v<T> : buckets{other.bucket} {}
+			atomic_unordered_map(atomic_unordered_map && other) noexcept : buckets{std::exchange(other.buckets, {})} {} //! @attention moved from object can only be destroyed!
 
 			auto operator=(atomic_unordered_map other) noexcept -> atomic_unordered_map & {
 				swap(other);
 				return *this;
 			}
 
-			~atomic_unordered_map() noexcept {
-				clear();
-				delete[] buckets;
-			}
+			~atomic_unordered_map() noexcept =default;
 
-			void swap(atomic_unordered_map & other) noexcept { std::swap(buckets, other.buckets); }
+			void swap(atomic_unordered_map & other) noexcept { buckets.swap(other.buckets); }
 
-			auto local(const init_func<T> & init) -> std::tuple<T &, bool> {
+			auto local(const init_func<T> & init) -> std::tuple<T &, bool> { //! @attention requires buckets to be allocated (not valid for moved-from instances)
 				const auto tid{std::this_thread::get_id()};
 				const auto hash{std::hash<std::thread::id>{}(tid)};
 				const auto ind{hash % bucket_count};
 				return buckets[ind].local(init);
 			}
 
-			void clear() noexcept {
-				if(buckets)
-					for(std::size_t i{0}; i < bucket_count; ++i)
-						buckets[i].clear();
-			}
+			void clear() noexcept { for(auto & bucket : buckets) bucket.clear(); }
 
-			auto begin() const noexcept -> iterator_t<true> { return buckets; }
-			auto begin()       noexcept -> iterator_t<false> { return buckets; }
+			auto begin() const noexcept -> iterator_t<true> { return buckets.data(); }
+			auto begin()       noexcept -> iterator_t<false> { return buckets.data(); }
 			auto end() const noexcept -> iterator_t<true> { return {}; }
 			auto end()       noexcept -> iterator_t<false> { return {}; }
 		};
