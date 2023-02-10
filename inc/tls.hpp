@@ -13,138 +13,135 @@
 #include <functional>
 #include <type_traits>
 
-//#define TLS_IMPL_HASHMAP
-
 namespace p2774 {
 	namespace internal {
-		template<typename T>
-		using init_func = std::function<T()>; //TODO: copyable_function after P2548 is adopted
-
-		template<typename T>
-		class atomic_forward_list final {
-			struct node final {
-				node(const init_func<T> & init) : value{init()} {}
-				node(const node & other) requires std::is_copy_constructible_v<T> : value{other.value}, owner{other.owner} {}
-
-				T value;
-				const std::thread::id owner{std::this_thread::get_id()};
-				node * next{nullptr};
-			};
-
-			std::atomic<node *> head{nullptr};
-		public:
-			template<bool IsConst>
-			class iterator_t final {
-				node * ptr{nullptr};
-
-				friend atomic_forward_list;
-
-				using tmp_type = std::atomic<node *>;
-				using head_type = std::conditional_t<IsConst, const tmp_type, tmp_type>;
-
-				iterator_t(head_type & head) noexcept : ptr{head.load()} {}
-			public:
-				using iterator_category = std::forward_iterator_tag;
-				using value_type        = T;
-				using difference_type   = std::ptrdiff_t;
-				using pointer           = std::conditional_t<IsConst, const T, T> *;
-				using reference         = std::conditional_t<IsConst, const T, T> &;
-
-				iterator_t() noexcept =default;
-
-				auto operator++() noexcept -> iterator_t & {
-					assert(ptr);
-					ptr = ptr->next;
-					return *this;
-				}
-				auto operator++(int) noexcept -> iterator_t {
-					auto tmp{*this};
-					++*this;
-					return tmp;
-				}
-
-				auto operator*() const noexcept -> reference {
-					assert(ptr);
-					return ptr->value;
-				}
-				auto operator->() const noexcept -> pointer { return &**this; }
-
-				friend
-				auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs.ptr == rhs.ptr; }
-			};
-
-			atomic_forward_list() noexcept =default;
-			atomic_forward_list(const atomic_forward_list & other) requires std::is_copy_constructible_v<T> {
-				try {
-					node * prev{nullptr};
-					for(auto ptr{other.head.load()}; ptr; ptr = ptr->next) {
-						auto tmp{new node{*ptr}};
-						if(prev) {
-							prev->next = tmp;
-							prev = tmp;
-						} else {
-							head = prev = tmp;
-						}
-					}
-				} catch(...) {
-					clear();
-					throw;
-				}
-			}
-			atomic_forward_list(atomic_forward_list && other) noexcept : head{other.head.exchange(nullptr)} {}
-
-			auto operator=(atomic_forward_list other) -> atomic_forward_list & {
-				swap(other);
-				return *this;
-			}
-
-			~atomic_forward_list() noexcept { clear(); }
-
-			void swap(atomic_forward_list & other) noexcept { head.exchange(other.head.exchange(head.load())); }
-
-			auto local(const init_func<T> & init) -> std::tuple<T &, bool> {
-				for(auto ptr{head.load()}; ptr; ptr = ptr->next)
-					if(ptr->owner == std::this_thread::get_id())
-						return {ptr->value, false};
-
-				auto ptr{new node(init)};
-				ptr->next = head.load();
-				while(!head.compare_exchange_weak(ptr->next, ptr));
-				return {ptr->value, true};
-			}
-
-			void clear() noexcept {
-				for(auto ptr{head.exchange(nullptr)}; ptr;) {
-					const auto old{ptr};
-					ptr = ptr->next;
-					delete old;
-				}
-			}
-
-			auto begin() const noexcept -> iterator_t<true> { return head; }
-			auto begin()       noexcept -> iterator_t<false> { return head; }
-			auto end() const noexcept -> iterator_t<true> { return {}; }
-			auto end()       noexcept -> iterator_t<false> { return {}; }
-		};
-
 		inline
 		const
 		std::size_t bucket_count{std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 1};
 
 		template<typename T>
+		using init_func = std::function<T()>; //TODO: copyable_function after P2548 is adopted
+
+		template<typename T>
 		class atomic_unordered_map final {
-			std::vector<atomic_forward_list<T>> buckets;
+			class atomic_forward_list final {
+				struct node final {
+					node(const init_func<T> & init) : value{init()} {}
+					node(const node & other) requires std::is_copy_constructible_v<T> : value{other.value}, owner{other.owner} {}
+
+					T value;
+					const std::thread::id owner{std::this_thread::get_id()};
+					node * next{nullptr};
+				};
+
+				std::atomic<node *> head{nullptr};
+			public:
+				template<bool IsConst>
+				class iterator_t final {
+					node * ptr{nullptr};
+
+					friend atomic_forward_list;
+
+					using tmp_type = std::atomic<node *>;
+					using head_type = std::conditional_t<IsConst, const tmp_type, tmp_type>;
+
+					iterator_t(head_type & head) noexcept : ptr{head.load()} {}
+				public:
+					using iterator_category = std::forward_iterator_tag;
+					using value_type        = T;
+					using difference_type   = std::ptrdiff_t;
+					using pointer           = std::conditional_t<IsConst, const T, T> *;
+					using reference         = std::conditional_t<IsConst, const T, T> &;
+
+					iterator_t() noexcept =default;
+
+					auto operator++() noexcept -> iterator_t & {
+						assert(ptr);
+						ptr = ptr->next;
+						return *this;
+					}
+					auto operator++(int) noexcept -> iterator_t {
+						auto tmp{*this};
+						++*this;
+						return tmp;
+					}
+
+					auto operator*() const noexcept -> reference {
+						assert(ptr);
+						return ptr->value;
+					}
+					auto operator->() const noexcept -> pointer { return &**this; }
+
+					friend
+					auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs.ptr == rhs.ptr; }
+				};
+
+				atomic_forward_list() noexcept =default;
+				atomic_forward_list(const atomic_forward_list & other) requires std::is_copy_constructible_v<T> {
+					try {
+						node * prev{nullptr};
+						for(auto ptr{other.head.load()}; ptr; ptr = ptr->next) {
+							auto tmp{new node{*ptr}};
+							if(prev) {
+								prev->next = tmp;
+								prev = tmp;
+							} else {
+								head = prev = tmp;
+							}
+						}
+					} catch(...) {
+						clear();
+						throw;
+					}
+				}
+				atomic_forward_list(atomic_forward_list && other) noexcept : head{other.head.exchange(nullptr)} {}
+
+				auto operator=(atomic_forward_list other) -> atomic_forward_list & {
+					swap(other);
+					return *this;
+				}
+
+				~atomic_forward_list() noexcept { clear(); }
+
+				void swap(atomic_forward_list & other) noexcept { head.exchange(other.head.exchange(head.load())); }
+
+				auto local(const init_func<T> & init) -> std::tuple<T &, bool> {
+					for(auto ptr{head.load()}; ptr; ptr = ptr->next)
+						if(ptr->owner == std::this_thread::get_id())
+							return {ptr->value, false};
+
+					auto ptr{new node(init)};
+					ptr->next = head.load();
+					while(!head.compare_exchange_weak(ptr->next, ptr));
+					return {ptr->value, true};
+				}
+
+				void clear() noexcept {
+					for(auto ptr{head.exchange(nullptr)}; ptr;) {
+						const auto old{ptr};
+						ptr = ptr->next;
+						delete old;
+					}
+				}
+
+				auto begin() const noexcept -> iterator_t<true> { return head; }
+				auto begin()       noexcept -> iterator_t<false> { return head; }
+				auto end() const noexcept -> iterator_t<true> { return {}; }
+				auto end()       noexcept -> iterator_t<false> { return {}; }
+			};
+
+			std::vector<atomic_forward_list> buckets;
 		public:
 			template<bool IsConst>
 			class iterator_t final {
-				using list_t = atomic_forward_list<T>;
-				std::conditional_t<IsConst, const list_t, list_t> * buckets{nullptr};
+				using list_t = std::conditional_t<IsConst, const atomic_forward_list, atomic_forward_list>;
+				list_t * buckets{nullptr};
 				std::size_t index{0};
-				typename list_t::template iterator_t<IsConst> it;
+				typename atomic_forward_list::template iterator_t<IsConst> it;
 
 				friend atomic_unordered_map;
 
-				iterator_t(atomic_forward_list<T> * buckets) noexcept : buckets{buckets} {
+				iterator_t(list_t * buckets) noexcept : buckets{buckets} {
 					if(buckets)
 						for(; index < bucket_count;) {
 							auto & bucket{this->buckets[index]};
@@ -187,7 +184,7 @@ namespace p2774 {
 			};
 
 			atomic_unordered_map() noexcept : buckets(bucket_count) {}
-			atomic_unordered_map(const atomic_unordered_map & other) requires std::is_copy_constructible_v<T> : buckets{other.bucket} {}
+			atomic_unordered_map(const atomic_unordered_map & other) requires std::is_copy_constructible_v<T> : buckets{other.buckets} {}
 			atomic_unordered_map(atomic_unordered_map && other) noexcept : buckets{std::exchange(other.buckets, {})} {} //! @attention moved from object can only be destroyed!
 
 			auto operator=(atomic_unordered_map other) noexcept -> atomic_unordered_map & {
@@ -220,11 +217,7 @@ namespace p2774 {
 	template<typename Type>
 	requires (std::is_same_v<Type, std::remove_cvref_t<Type>>)
 	class tls final {
-#ifndef TLS_IMPL_HASHMAP
-		using storage_t = internal::atomic_forward_list<Type>;
-#else
 		using storage_t = internal::atomic_unordered_map<Type>;
-#endif
 		storage_t storage;
 		internal::init_func<Type> init;
 	public:
