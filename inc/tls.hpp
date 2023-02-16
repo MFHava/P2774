@@ -203,6 +203,8 @@ namespace p2774 {
 			~atomic_unordered_map() noexcept =default;
 
 			void swap(atomic_unordered_map & other) noexcept { buckets.store(other.buckets.exchange(buckets.load())); }
+			friend
+			void swap(atomic_unordered_map & lhs, atomic_unordered_map & rhs) noexcept { lhs.swap(rhs); }
 
 			auto local(const init_func<T> & init) -> std::tuple<T &, bool> {
 				auto bptr{buckets.load()};
