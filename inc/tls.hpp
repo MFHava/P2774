@@ -181,10 +181,11 @@ namespace p2774 {
 				auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs.it == rhs.it; }
 			};
 
-			atomic_unordered_map() noexcept : buckets{new atomic_forward_list[bucket_count]} {}
-			atomic_unordered_map(const atomic_unordered_map & other) requires std::is_copy_constructible_v<T> : buckets{new atomic_forward_list[bucket_count]} {
+			atomic_unordered_map() noexcept =default;
+			atomic_unordered_map(const atomic_unordered_map & other) requires std::is_copy_constructible_v<T> {
 				auto ptr{other.buckets.load()};
 				if(!ptr) return; //other is in moved-from state
+				buckets = new atomic_forward_list[bucket_count];
 				try {
 					for(std::size_t i{0}; i < bucket_count; ++i) buckets[i] = ptr[i];
 				} catch(...) {
