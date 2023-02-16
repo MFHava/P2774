@@ -205,8 +205,8 @@ namespace p2774 {
 
 			void clear() noexcept { for(auto & bucket : buckets) bucket.clear(); }
 
-			auto begin() const noexcept -> iterator_t<true> { return buckets.data(); }
-			auto begin()       noexcept -> iterator_t<false> { return buckets.data(); }
+			auto begin() const noexcept -> iterator_t<true> { return buckets.empty() ? nullptr : buckets.data(); }
+			auto begin()       noexcept -> iterator_t<false> { return buckets.empty() ? nullptr : buckets.data(); }
 			auto end() const noexcept -> iterator_t<true> { return {}; }
 			auto end()       noexcept -> iterator_t<false> { return {}; }
 		};
