@@ -205,19 +205,22 @@ namespace p2774 {
 			void swap(atomic_unordered_map & other) noexcept { buckets.store(other.buckets.exchange(buckets.load())); }
 
 			auto local(const init_func<T> & init) -> std::tuple<T &, bool> {
-				if(!buckets) { //in moved-from state
+				auto bptr{buckets.load()};
+				if(!bptr) { //in moved-from state
 					auto ptr{new atomic_forward_list[bucket_count]};
-					if(atomic_forward_list * expected{nullptr}; !buckets.compare_exchange_strong(expected, ptr)) {
+					if(atomic_forward_list * expected{nullptr}; buckets.compare_exchange_strong(expected, ptr)) bptr = ptr;
+					else {
 						assert(expected);
 						delete[] ptr; //this block wasn't actually needed after all
+						bptr = expected;
 					}
 				}
-				assert(buckets);
+				assert(bptr);
 
 				const auto tid{std::this_thread::get_id()};
 				const auto hash{std::hash<std::thread::id>{}(tid)};
 				const auto ind{hash % bucket_count};
-				return buckets[ind].local(init);
+				return bptr[ind].local(init);
 			}
 
 			void clear() noexcept {
