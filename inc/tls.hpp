@@ -8,7 +8,6 @@
 #include <tuple>
 #include <atomic>
 #include <thread>
-#include <vector>
 #include <concepts>
 #include <functional>
 #include <type_traits>
@@ -103,7 +102,7 @@ namespace p2774 {
 
 				~atomic_forward_list() noexcept { clear(); }
 
-				void swap(atomic_forward_list & other) noexcept { head.exchange(other.head.exchange(head.load())); }
+				void swap(atomic_forward_list & other) noexcept { head.store(other.head.exchange(head.load())); }
 
 				auto local(const init_func<T> & init) -> std::tuple<T &, bool> {
 					for(auto ptr{head.load()}; ptr; ptr = ptr->next)
@@ -130,7 +129,7 @@ namespace p2774 {
 				auto end()       noexcept -> iterator_t<false> { return {}; }
 			};
 
-			std::vector<atomic_forward_list> buckets;
+			std::atomic<atomic_forward_list *> buckets{nullptr};
 		public:
 			template<bool IsConst>
 			class iterator_t final {
@@ -183,9 +182,18 @@ namespace p2774 {
 				auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs.it == rhs.it; }
 			};
 
-			atomic_unordered_map() noexcept : buckets(bucket_count) {}
-			atomic_unordered_map(const atomic_unordered_map & other) requires std::is_copy_constructible_v<T> : buckets{other.buckets} {}
-			atomic_unordered_map(atomic_unordered_map && other) noexcept : buckets{std::exchange(other.buckets, {})} {} //! @attention moved from object can only be destroyed!
+			atomic_unordered_map() noexcept : buckets{new atomic_forward_list[bucket_count]} {}
+			atomic_unordered_map(const atomic_unordered_map & other) requires std::is_copy_constructible_v<T> : buckets{new atomic_forward_list[bucket_count]} {
+				auto ptr{other.buckets.load()};
+				if(!ptr) return; //other is in moved-from state
+				try {
+					for(std::size_t i{0}; i < bucket_count; ++i) buckets[i] = ptr[i];
+				} catch(...) {
+					delete[] buckets;
+					throw;
+				}
+			}
+			atomic_unordered_map(atomic_unordered_map && other) noexcept : buckets{other.buckets.exchange(nullptr)} {}
 
 			auto operator=(atomic_unordered_map other) noexcept -> atomic_unordered_map & {
 				swap(other);
@@ -194,19 +202,32 @@ namespace p2774 {
 
 			~atomic_unordered_map() noexcept =default;
 
-			void swap(atomic_unordered_map & other) noexcept { buckets.swap(other.buckets); }
+			void swap(atomic_unordered_map & other) noexcept { buckets.store(other.buckets.exchange(buckets.load())); }
 
-			auto local(const init_func<T> & init) -> std::tuple<T &, bool> { //! @attention requires buckets to be allocated (not valid for moved-from instances)
+			auto local(const init_func<T> & init) -> std::tuple<T &, bool> {
+				if(!buckets) { //in moved-from state
+					auto ptr{new atomic_forward_list[bucket_count]};
+					if(atomic_forward_list * expected{nullptr}; !buckets.compare_exchange_strong(expected, ptr)) {
+						assert(expected);
+						delete[] ptr; //this block wasn't actually needed after all
+					}
+				}
+				assert(buckets);
+
 				const auto tid{std::this_thread::get_id()};
 				const auto hash{std::hash<std::thread::id>{}(tid)};
 				const auto ind{hash % bucket_count};
 				return buckets[ind].local(init);
 			}
 
-			void clear() noexcept { for(auto & bucket : buckets) bucket.clear(); }
+			void clear() noexcept {
+				auto ptr{buckets.load()};
+				if(!ptr) return; //in moved-from state
+				for(std::size_t i{0}; i < bucket_count; ++i) ptr[i].clear();
+			}
 
-			auto begin() const noexcept -> iterator_t<true> { return buckets.empty() ? nullptr : buckets.data(); }
-			auto begin()       noexcept -> iterator_t<false> { return buckets.empty() ? nullptr : buckets.data(); }
+			auto begin() const noexcept -> iterator_t<true> { return buckets.load(); }
+			auto begin()       noexcept -> iterator_t<false> { return buckets.load(); }
 			auto end() const noexcept -> iterator_t<true> { return {}; }
 			auto end()       noexcept -> iterator_t<false> { return {}; }
 		};
