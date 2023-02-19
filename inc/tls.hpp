@@ -13,6 +13,9 @@
 
 namespace p2774 {
 	namespace internal {
+		template<bool IsConst, typename T>
+		using add_const_t = std::conditional_t<IsConst, const T, T>;
+
 		inline
 		const
 		std::size_t bucket_count{std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 1};
@@ -40,17 +43,8 @@ namespace p2774 {
 
 					friend atomic_forward_list;
 
-					using tmp_type = std::atomic<node *>;
-					using head_type = std::conditional_t<IsConst, const tmp_type, tmp_type>;
-
-					iterator_t(head_type & head) noexcept : ptr{head.load()} {}
+					iterator_t(add_const_t<IsConst, std::atomic<node *>> & head) noexcept : ptr{head.load()} {}
 				public:
-					using iterator_category = std::forward_iterator_tag;
-					using value_type        = T;
-					using difference_type   = std::ptrdiff_t;
-					using pointer           = std::conditional_t<IsConst, const T, T> *;
-					using reference         = std::conditional_t<IsConst, const T, T> &;
-
 					iterator_t() noexcept =default;
 
 					auto operator++() noexcept -> iterator_t & {
@@ -58,17 +52,11 @@ namespace p2774 {
 						ptr = ptr->next;
 						return *this;
 					}
-					auto operator++(int) noexcept -> iterator_t {
-						auto tmp{*this};
-						++*this;
-						return tmp;
-					}
 
-					auto operator*() const noexcept -> reference {
+					auto operator*() const noexcept -> add_const_t<IsConst, T> & {
 						assert(ptr);
 						return ptr->value;
 					}
-					auto operator->() const noexcept -> pointer { return &**this; }
 
 					friend
 					auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs.ptr == rhs.ptr; }
@@ -83,25 +71,21 @@ namespace p2774 {
 							if(prev) {
 								prev->next = tmp;
 								prev = tmp;
-							} else {
-								head = prev = tmp;
-							}
+							} else head = prev = tmp;
 						}
 					} catch(...) {
 						clear();
 						throw;
 					}
 				}
-				atomic_forward_list(atomic_forward_list && other) noexcept : head{other.head.exchange(nullptr)} {}
+				atomic_forward_list(atomic_forward_list &&) noexcept =delete;
 
 				auto operator=(atomic_forward_list other) -> atomic_forward_list & {
-					swap(other);
+					head.store(other.head.exchange(head.load()));
 					return *this;
 				}
 
 				~atomic_forward_list() noexcept { clear(); }
-
-				void swap(atomic_forward_list & other) noexcept { head.store(other.head.exchange(head.load())); }
 
 				auto local(const init_func<T> & init) -> std::tuple<T &, bool> {
 					for(auto ptr{head.load()}; ptr; ptr = ptr->next)
@@ -129,10 +113,10 @@ namespace p2774 {
 			};
 
 			std::atomic<atomic_forward_list *> buckets{nullptr};
-		public:
+
 			template<bool IsConst>
 			class iterator_t final {
-				using list_t = std::conditional_t<IsConst, const atomic_forward_list, atomic_forward_list>;
+				using list_t = add_const_t<IsConst, atomic_forward_list>;
 				list_t * buckets{nullptr};
 				std::size_t index{0};
 				typename atomic_forward_list::template iterator_t<IsConst> it;
@@ -152,8 +136,8 @@ namespace p2774 {
 				using iterator_category = std::forward_iterator_tag;
 				using value_type        = T;
 				using difference_type   = std::ptrdiff_t;
-				using pointer           = std::conditional_t<IsConst, const T, T> *;
-				using reference         = std::conditional_t<IsConst, const T, T> &;
+				using pointer           = add_const_t<IsConst, T> *;
+				using reference         = add_const_t<IsConst, T> &;
 
 				iterator_t() noexcept =default;
 
@@ -180,12 +164,16 @@ namespace p2774 {
 				friend
 				auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs.it == rhs.it; }
 			};
+		public:
+			using iterator       = iterator_t<false>;
+			static_assert(std::forward_iterator<iterator>);
+			using const_iterator = iterator_t<true>;
+			static_assert(std::forward_iterator<const_iterator>);
 
-			atomic_unordered_map() noexcept =default;
-			atomic_unordered_map(const atomic_unordered_map & other) requires std::is_copy_constructible_v<T> {
+			atomic_unordered_map() : buckets{new atomic_forward_list[bucket_count]} {}
+			atomic_unordered_map(const atomic_unordered_map & other) requires std::is_copy_constructible_v<T> : buckets{new atomic_forward_list[bucket_count]} {
 				auto ptr{other.buckets.load()};
 				if(!ptr) return; //other is in moved-from state
-				buckets = new atomic_forward_list[bucket_count];
 				try {
 					for(std::size_t i{0}; i < bucket_count; ++i) buckets[i] = ptr[i];
 				} catch(...) {
@@ -200,15 +188,13 @@ namespace p2774 {
 				return *this;
 			}
 
-			~atomic_unordered_map() noexcept =default;
+			~atomic_unordered_map() noexcept { clear(); }
 
 			void swap(atomic_unordered_map & other) noexcept { buckets.store(other.buckets.exchange(buckets.load())); }
-			friend
-			void swap(atomic_unordered_map & lhs, atomic_unordered_map & rhs) noexcept { lhs.swap(rhs); }
 
 			auto local(const init_func<T> & init) -> std::tuple<T &, bool> {
 				auto bptr{buckets.load()};
-				if(!bptr) { //in moved-from state
+				if(!bptr) [[unlikely]] { //in moved-from state
 					auto ptr{new atomic_forward_list[bucket_count]};
 					if(atomic_forward_list * expected{nullptr}; buckets.compare_exchange_strong(expected, ptr)) bptr = ptr;
 					else {
@@ -231,10 +217,10 @@ namespace p2774 {
 				for(std::size_t i{0}; i < bucket_count; ++i) ptr[i].clear();
 			}
 
-			auto begin() const noexcept -> iterator_t<true> { return buckets.load(); }
-			auto begin()       noexcept -> iterator_t<false> { return buckets.load(); }
-			auto end() const noexcept -> iterator_t<true> { return {}; }
-			auto end()       noexcept -> iterator_t<false> { return {}; }
+			auto begin() const noexcept -> const_iterator { return buckets.load(); }
+			auto begin()       noexcept -> iterator { return buckets.load(); }
+			auto end() const noexcept -> const_iterator { return {}; }
+			auto end()       noexcept -> iterator { return {}; }
 		};
 	}
 
@@ -247,6 +233,9 @@ namespace p2774 {
 		storage_t storage;
 		internal::init_func<Type> init;
 	public:
+		using iterator       = typename storage_t::iterator;
+		using const_iterator = typename storage_t::const_iterator;
+
 		template<typename Func>
 		requires std::is_convertible_v<Type, std::invoke_result_t<Func>>
 		tls(Func f) : init{std::move(f)} {}
@@ -266,9 +255,8 @@ namespace p2774 {
 		~tls() noexcept =default;
 
 		void swap(tls & other) noexcept {
-			using std::swap;
-			swap(init, other.init);
-			swap(storage, other.storage);
+			init.swap(other.init);
+			storage.swap(other.storage);
 		}
 		friend
 		void swap(tls & lhs, tls & rhs) noexcept { lhs.swap(rhs); }
@@ -287,11 +275,6 @@ namespace p2774 {
 		//! @name Iteration
 		//! @brief forward iteration support for thread-local storage
 		//! @{
-		using iterator       = typename storage_t::template iterator_t<false>;
-		static_assert(std::forward_iterator<iterator>);
-		using const_iterator = typename storage_t::template iterator_t<true>;
-		static_assert(std::forward_iterator<const_iterator>);
-
 		auto begin() const noexcept -> const_iterator { return storage.begin(); }
 		auto begin()       noexcept -> iterator { return storage.begin(); }
 		auto end() const noexcept -> const_iterator { return storage.end(); }
