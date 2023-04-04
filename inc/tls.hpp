@@ -10,6 +10,7 @@
 #include <thread>
 #include <functional>
 #include <type_traits>
+#include <memory_resource>
 
 namespace p2774 {
 	namespace internal {
@@ -23,7 +24,7 @@ namespace p2774 {
 		template<typename T>
 		using init_func = std::move_only_function<T() const>;
 
-		template<typename T>
+		template<typename T, typename Allocator>
 		class atomic_unordered_map final {
 			class atomic_forward_list final {
 				struct node final {
@@ -34,7 +35,9 @@ namespace p2774 {
 					node * next{nullptr};
 				};
 
+				using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<node>;
 				std::atomic<node *> head{nullptr};
+				[[no_unique_address]] typename allocator_traits::allocator_type allocator;
 			public:
 				template<bool IsConst>
 				class iterator_t final {
@@ -61,7 +64,7 @@ namespace p2774 {
 					auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs.ptr == rhs.ptr; }
 				};
 
-				atomic_forward_list() noexcept =default;
+				atomic_forward_list(const Allocator & alloc) noexcept : allocator{alloc} {}
 				atomic_forward_list(const atomic_forward_list &) =delete;
 				auto operator=(const atomic_forward_list &) -> atomic_forward_list & =delete;
 				~atomic_forward_list() noexcept { clear(); }
@@ -71,7 +74,13 @@ namespace p2774 {
 						if(ptr->owner == std::this_thread::get_id())
 							return {ptr->value, false};
 
-					auto ptr{new node(init)};
+					auto ptr{allocator_traits::allocate(allocator, 1)};
+					try {
+						allocator_traits::construct(allocator, ptr, init);
+					} catch(...) { 
+						allocator_traits::deallocate(allocator, ptr, 1);
+						throw;
+					}
 					ptr->next = head.load();
 					while(!head.compare_exchange_weak(ptr->next, ptr));
 					return {ptr->value, true};
@@ -81,7 +90,8 @@ namespace p2774 {
 					for(auto ptr{head.exchange(nullptr)}; ptr;) {
 						const auto old{ptr};
 						ptr = ptr->next;
-						delete old;
+						allocator_traits::destroy(allocator, old);
+						allocator_traits::deallocate(allocator, old, 1);
 					}
 				}
 
@@ -90,8 +100,10 @@ namespace p2774 {
 				auto end() const noexcept -> iterator_t<true> { return {}; }
 				auto end()       noexcept -> iterator_t<false> { return {}; }
 			};
+			using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<atomic_forward_list>;
 
-			std::atomic<atomic_forward_list *> buckets{new atomic_forward_list[bucket_count]};
+			std::atomic<atomic_forward_list *> buckets;
+			[[no_unique_address]] typename allocator_traits::allocator_type allocator;
 
 			template<bool IsConst>
 			class iterator_t final {
@@ -149,12 +161,18 @@ namespace p2774 {
 			using const_iterator = iterator_t<true>;
 			static_assert(std::forward_iterator<const_iterator>);
 
-			atomic_unordered_map() =default;
+			atomic_unordered_map(const Allocator & alloc) : allocator{alloc} {
+				auto ptr{allocator_traits::allocate(allocator, bucket_count)};
+				for(std::size_t i{0}; i < bucket_count; ++i) allocator_traits::construct(allocator, ptr + i, allocator);
+				buckets = ptr;
+			}
 			atomic_unordered_map(const atomic_unordered_map &) =delete;
 			auto operator=(const atomic_unordered_map &) -> atomic_unordered_map & =delete;
 			~atomic_unordered_map() noexcept {
 				clear();
-				delete[] buckets;
+				auto ptr{buckets.load()};
+				for(std::size_t i{0}; i < bucket_count; ++i) allocator_traits::destroy(allocator, ptr + i);
+				allocator_traits::deallocate(allocator, ptr, bucket_count);
 			}
 
 			auto local(const init_func<T> & init) -> std::tuple<T &, bool> {
@@ -178,10 +196,11 @@ namespace p2774 {
 
 	//! @brief scoped thread-local storage
 	//! @tparam Type type of thread-local storage
-	template<typename Type>
+	//! @tparam Allocator allocator to use, must be concurrency-safe!
+	template<typename Type, typename Allocator = std::allocator<Type>>
 	requires (std::is_same_v<Type, std::remove_cvref_t<Type>>)
 	class tls final {
-		using storage_t = internal::atomic_unordered_map<Type>;
+		using storage_t = internal::atomic_unordered_map<Type, Allocator>;
 		storage_t storage;
 		internal::init_func<Type> init;
 	public:
@@ -190,11 +209,15 @@ namespace p2774 {
 
 		template<typename Func>
 		requires std::is_convertible_v<Type, std::invoke_result_t<Func>>
-		tls(Func f) : init{std::move(f)} {}
+		explicit
+		tls(Func f, const Allocator & allocator = Allocator{}) : storage{allocator}, init{std::move(f)} {}
 
-		template<typename... Args>
-		requires (std::is_constructible_v<Type, Args...> && (std::is_copy_constructible_v<Args> && ...))
-		tls(Args &&... args) : tls{[=] { return Type(args...); }} {}
+		explicit
+		tls(const Allocator & allocator = Allocator{}) requires std::is_default_constructible_v<Type> : tls{[] { return Type{}; }, allocator} {}
+		explicit
+		tls(const Type & val, const Allocator & allocator = Allocator{}) requires std::is_copy_constructible_v<Type> : tls{[=] { return val; }, allocator} {}
+		explicit
+		tls(Type && val, const Allocator & allocator = Allocator{}) requires std::is_copy_constructible_v<Type> : tls{[val{std::move(val)}] { return val; }, allocator} {}
 
 		tls(const tls &) =delete;
 		auto operator=(const tls &) -> tls & =delete;
@@ -224,4 +247,9 @@ namespace p2774 {
 		auto cend() const noexcept -> const_iterator { return end(); }
 		//! @}
 	};
+
+	namespace pmr {
+		template<typename Type>
+		using tls = p2774::tls<Type, std::pmr::polymorphic_allocator<Type>>;
+	}
 }
