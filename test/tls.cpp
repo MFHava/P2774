@@ -23,6 +23,8 @@ namespace {
 		auto operator=(move_only &&) noexcept -> move_only & =default;
 		~move_only() noexcept =default;
 	};
+
+	//TODO: test with custom allocator
 }
 
 TEST_CASE("tls default ctor", "[tls] [ctor] [default]") {
