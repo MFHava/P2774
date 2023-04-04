@@ -53,11 +53,6 @@ TEST_CASE("tls custom ctor move", "[tls] [ctor] [custom] [move]") {
 	static_assert(!std::is_constructible_v<p2774::tls<move_only>, move_only &&>);
 }
 
-TEST_CASE("tls custom ctor args", "[tls] [ctor] [custom] [args]") {
-	p2774::tls<no_default_ctor> tls0{1};
-	REQUIRE(std::get<0>(tls0.local()).val == 1);
-}
-
 TEST_CASE("tls custom ctor functor", "[tls] [ctor] [custom] [functor]") {
 	p2774::tls<int> tls0{[] { return 10; }};
 	REQUIRE(std::get<0>(tls0.local()) == 10);

@@ -8,7 +8,6 @@
 #include <tuple>
 #include <atomic>
 #include <thread>
-#include <functional>
 #include <type_traits>
 #include <memory_resource>
 
@@ -21,14 +20,11 @@ namespace p2774 {
 		const
 		std::size_t bucket_count{std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 1};
 
-		template<typename T>
-		using init_func = std::move_only_function<T() const>;
-
 		template<typename T, typename Allocator>
 		class atomic_unordered_map final {
 			class atomic_forward_list final {
 				struct node final {
-					node(const init_func<T> & init) : value{init()} {}
+					node(const auto & init) : value{init()} {}
 
 					T value;
 					const std::thread::id owner{std::this_thread::get_id()};
@@ -69,7 +65,7 @@ namespace p2774 {
 				auto operator=(const atomic_forward_list &) -> atomic_forward_list & =delete;
 				~atomic_forward_list() noexcept { clear(); }
 
-				auto local(const init_func<T> & init) -> std::tuple<T &, bool> {
+				auto local(const auto & init) -> std::tuple<T &, bool> {
 					for(auto ptr{head.load()}; ptr; ptr = ptr->next)
 						if(ptr->owner == std::this_thread::get_id())
 							return {ptr->value, false};
@@ -175,7 +171,7 @@ namespace p2774 {
 				allocator_traits::deallocate(allocator, ptr, bucket_count);
 			}
 
-			auto local(const init_func<T> & init) -> std::tuple<T &, bool> {
+			auto local(const auto & init) -> std::tuple<T &, bool> {
 				const auto tid{std::this_thread::get_id()};
 				const auto hash{std::hash<std::thread::id>{}(tid)};
 				const auto ind{hash % bucket_count};
@@ -192,6 +188,50 @@ namespace p2774 {
 			auto end() const noexcept -> const_iterator { return {}; }
 			auto end()       noexcept -> iterator { return {}; }
 		};
+
+		template<typename T, typename Allocator>
+		class init_func final {
+			struct vtable final {
+				void(*dtor)(void *, const Allocator &) noexcept;
+				T(*call)(const void *);
+			};
+			void * functor;
+			const vtable * vptr;
+			[[no_unique_address]] Allocator allocator;
+		public:
+			template<typename F>
+			requires std::is_invocable_v<F>
+			init_func(F func, const Allocator & alloc) : allocator{alloc} {
+				using VT = std::decay_t<F>;
+				static_assert(std::is_constructible_v<VT, F>);
+				if constexpr(std::is_function_v<std::remove_pointer_t<F>>) assert(func);
+
+				using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<VT>;
+				using allocator_type = typename allocator_traits::allocator_type;
+
+				static constexpr vtable vtable{
+					+[](void * functor, const Allocator & alloc) noexcept {
+						allocator_type a{alloc};
+						auto ptr{reinterpret_cast<VT *>(functor)};
+						allocator_traits::destroy(a, ptr);
+						allocator_traits::deallocate(a, ptr, 1);
+					},
+					+[](const void * functor) { return std::invoke_r<T>(*reinterpret_cast<const VT *>(functor)); }
+				};
+				vptr = &vtable;
+				allocator_type a{alloc};
+				auto ptr{allocator_traits::allocate(a, 1)};
+				allocator_traits::construct(a, ptr, std::move(func));
+				functor = ptr;
+			}
+
+			init_func(const init_func &) =delete;
+			auto operator=(const init_func &) -> init_func & =delete;
+
+			~init_func() noexcept { vptr->dtor(functor, allocator); }
+
+			auto operator()() const -> T { return vptr->call(functor); }
+		};
 	}
 
 	//! @brief scoped thread-local storage
@@ -202,7 +242,7 @@ namespace p2774 {
 	class tls final {
 		using storage_t = internal::atomic_unordered_map<Type, Allocator>;
 		storage_t storage;
-		internal::init_func<Type> init;
+		internal::init_func<Type, Allocator> init;
 	public:
 		using iterator       = typename storage_t::iterator;
 		using const_iterator = typename storage_t::const_iterator;
@@ -210,8 +250,7 @@ namespace p2774 {
 		template<typename Func>
 		requires std::is_convertible_v<Type, std::invoke_result_t<Func>>
 		explicit
-		tls(Func f, const Allocator & allocator = Allocator{}) : storage{allocator}, init{std::move(f)} {}
-
+		tls(Func func, const Allocator & allocator = Allocator{}) : storage{allocator}, init{std::move(func), allocator} {}
 		explicit
 		tls(const Allocator & allocator = Allocator{}) requires std::is_default_constructible_v<Type> : tls{[] { return Type{}; }, allocator} {}
 		explicit
