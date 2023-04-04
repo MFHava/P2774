@@ -21,14 +21,13 @@ namespace p2774 {
 		std::size_t bucket_count{std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 1};
 
 		template<typename T>
-		using init_func = std::function<T()>; //TODO: copyable_function after P2548 is adopted
+		using init_func = std::move_only_function<T() const>;
 
 		template<typename T>
 		class atomic_unordered_map final {
 			class atomic_forward_list final {
 				struct node final {
 					node(const init_func<T> & init) : value{init()} {}
-					node(const node & other) requires std::is_copy_constructible_v<T> : value{other.value}, owner{other.owner} {}
 
 					T value;
 					const std::thread::id owner{std::this_thread::get_id()};
@@ -63,28 +62,8 @@ namespace p2774 {
 				};
 
 				atomic_forward_list() noexcept =default;
-				atomic_forward_list(const atomic_forward_list & other) requires std::is_copy_constructible_v<T> {
-					try {
-						node * prev{nullptr};
-						for(auto ptr{other.head.load()}; ptr; ptr = ptr->next) {
-							auto tmp{new node{*ptr}};
-							if(prev) {
-								prev->next = tmp;
-								prev = tmp;
-							} else head = prev = tmp;
-						}
-					} catch(...) {
-						clear();
-						throw;
-					}
-				}
-				atomic_forward_list(atomic_forward_list &&) noexcept =delete;
-
-				auto operator=(atomic_forward_list other) -> atomic_forward_list & {
-					head.store(other.head.exchange(head.load()));
-					return *this;
-				}
-
+				atomic_forward_list(const atomic_forward_list &) =delete;
+				auto operator=(const atomic_forward_list &) -> atomic_forward_list & =delete;
 				~atomic_forward_list() noexcept { clear(); }
 
 				auto local(const init_func<T> & init) -> std::tuple<T &, bool> {
@@ -112,7 +91,7 @@ namespace p2774 {
 				auto end()       noexcept -> iterator_t<false> { return {}; }
 			};
 
-			std::atomic<atomic_forward_list *> buckets{nullptr};
+			std::atomic<atomic_forward_list *> buckets{new atomic_forward_list[bucket_count]};
 
 			template<bool IsConst>
 			class iterator_t final {
@@ -170,50 +149,23 @@ namespace p2774 {
 			using const_iterator = iterator_t<true>;
 			static_assert(std::forward_iterator<const_iterator>);
 
-			atomic_unordered_map() : buckets{new atomic_forward_list[bucket_count]} {}
-			atomic_unordered_map(const atomic_unordered_map & other) requires std::is_copy_constructible_v<T> : buckets{new atomic_forward_list[bucket_count]} {
-				auto ptr{other.buckets.load()};
-				if(!ptr) return; //other is in moved-from state
-				try {
-					for(std::size_t i{0}; i < bucket_count; ++i) buckets[i] = ptr[i];
-				} catch(...) {
-					delete[] buckets;
-					throw;
-				}
+			atomic_unordered_map() =default;
+			atomic_unordered_map(const atomic_unordered_map &) =delete;
+			auto operator=(const atomic_unordered_map &) -> atomic_unordered_map & =delete;
+			~atomic_unordered_map() noexcept {
+				clear();
+				delete[] buckets;
 			}
-			atomic_unordered_map(atomic_unordered_map && other) noexcept : buckets{other.buckets.exchange(nullptr)} {}
-
-			auto operator=(atomic_unordered_map other) noexcept -> atomic_unordered_map & {
-				swap(other);
-				return *this;
-			}
-
-			~atomic_unordered_map() noexcept { clear(); }
-
-			void swap(atomic_unordered_map & other) noexcept { buckets.store(other.buckets.exchange(buckets.load())); }
 
 			auto local(const init_func<T> & init) -> std::tuple<T &, bool> {
-				auto bptr{buckets.load()};
-				if(!bptr) [[unlikely]] { //in moved-from state
-					auto ptr{new atomic_forward_list[bucket_count]};
-					if(atomic_forward_list * expected{nullptr}; buckets.compare_exchange_strong(expected, ptr)) bptr = ptr;
-					else {
-						assert(expected);
-						delete[] ptr; //this block wasn't actually needed after all
-						bptr = expected;
-					}
-				}
-				assert(bptr);
-
 				const auto tid{std::this_thread::get_id()};
 				const auto hash{std::hash<std::thread::id>{}(tid)};
 				const auto ind{hash % bucket_count};
-				return bptr[ind].local(init);
+				return buckets[ind].local(init);
 			}
 
 			void clear() noexcept {
 				auto ptr{buckets.load()};
-				if(!ptr) return; //in moved-from state
 				for(std::size_t i{0}; i < bucket_count; ++i) ptr[i].clear();
 			}
 
@@ -244,22 +196,10 @@ namespace p2774 {
 		requires (std::is_constructible_v<Type, Args...> && (std::is_copy_constructible_v<Args> && ...))
 		tls(Args &&... args) : tls{[=] { return Type(args...); }} {}
 
-		tls(const tls &) requires std::is_copy_constructible_v<Type> =default;
-		tls(tls &&) noexcept =default;
-
-		auto operator=(tls other) noexcept -> tls & {
-			swap(other);
-			return *this;
-		}
+		tls(const tls &) =delete;
+		auto operator=(const tls &) -> tls & =delete;
 
 		~tls() noexcept =default;
-
-		void swap(tls & other) noexcept {
-			init.swap(other.init);
-			storage.swap(other.storage);
-		}
-		friend
-		void swap(tls & lhs, tls & rhs) noexcept { lhs.swap(rhs); }
 
 		//! @brief get access to thread-local storage
 		//! @returns tuple with reference to thread-local storage and a bool flag specifying whether the element was newly allocated (=true)

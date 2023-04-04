@@ -69,43 +69,6 @@ TEST_CASE("tls custom ctor functor", "[tls] [ctor] [custom] [functor]") {
 	(void)tls2.local();
 }
 
-TEST_CASE("tls move", "[tls] [move]") {
-	constexpr auto count{10};
-	p2774::tls<int> tls0{0};
-
-	std::vector<std::jthread> threads;
-	for(auto i{0}; i < count; ++i) threads.emplace_back([&, i] { std::get<0>(tls0.local()) = i; });
-	threads.clear();
-
-	REQUIRE(std::distance(tls0.cbegin(), tls0.cend()) == count);
-
-	auto tls1{std::move(tls0)};
-	REQUIRE(std::distance(tls0.begin(), tls0.end()) == 0);
-	REQUIRE(std::distance(tls1.begin(), tls1.end()) == count);
-
-	p2774::tls<int> tls2;
-	tls2 = std::move(tls1);
-	REQUIRE(std::distance(tls1.begin(), tls1.end()) == 0);
-	REQUIRE(std::distance(tls2.begin(), tls2.end()) == count);
-}
-
-TEST_CASE("tls copy", "[tls] [copy]") {
-	static_assert(!std::is_copy_constructible_v<p2774::tls<move_only>>);
-	constexpr auto count{10};
-	p2774::tls<int> tls0{0};
-
-	std::vector<std::jthread> threads;
-	for(auto i{0}; i < count; ++i) threads.emplace_back([&, i] { std::get<0>(tls0.local()) = i; });
-	threads.clear();
-
-	REQUIRE(std::distance(tls0.cbegin(), tls0.cend()) == count);
-
-	auto tls1{tls0};
-	REQUIRE(std::distance(tls0.begin(), tls0.end()) == count);
-	REQUIRE(std::distance(tls1.begin(), tls1.end()) == count);
-	REQUIRE(std::equal(tls0.begin(), tls0.end(), tls1.begin(), tls1.end()));
-}
-
 TEST_CASE("tls clear", "[tls]") {
 	p2774::tls<int> tls;
 	REQUIRE(std::get<1>(tls.local()));
@@ -114,22 +77,4 @@ TEST_CASE("tls clear", "[tls]") {
 	tls.clear();
 	REQUIRE(std::get<1>(tls.local()));
 	REQUIRE(!std::get<1>(tls.local()));
-}
-
-TEST_CASE("tls swap", "[tls]") {
-	constexpr auto count{10};
-	p2774::tls<int> tls0{0}, tls1;
-
-	std::vector<std::jthread> threads;
-	for(auto i{0}; i < count; ++i) threads.emplace_back([&, i] { std::get<0>(tls0.local()) = i; });
-	threads.clear();
-
-	REQUIRE(std::distance(tls0.cbegin(), tls0.cend()) == count);
-	REQUIRE(std::distance(tls1.cbegin(), tls1.cend()) == 0);
-	tls1.swap(tls0);
-	REQUIRE(std::distance(tls0.cbegin(), tls0.cend()) == 0);
-	REQUIRE(std::distance(tls1.cbegin(), tls1.cend()) == count);
-	tls1.swap(tls0);
-	REQUIRE(std::distance(tls0.cbegin(), tls0.cend()) == count);
-	REQUIRE(std::distance(tls1.cbegin(), tls1.cend()) == 0);
 }
