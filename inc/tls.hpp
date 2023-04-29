@@ -22,53 +22,28 @@ namespace p2774 {
 
 		template<typename T, typename Allocator>
 		class atomic_unordered_map final {
-			class atomic_forward_list final {
-				struct node final {
-					node(const auto & init) : value{init()} {}
+			struct node final {
+				node(const auto & init) : value{init()} {}
 
-					T value;
-					const std::thread::id owner{std::this_thread::get_id()};
-					node * next{nullptr};
-				};
+				T value;
+				const std::thread::id owner{std::this_thread::get_id()};
+				node * bucket_next{nullptr}, * list_next{nullptr};
+			};
 
+			class bucket_list final {
 				using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<node>;
 				std::atomic<node *> head{nullptr};
 				[[no_unique_address]] typename allocator_traits::allocator_type allocator;
 			public:
-				template<bool IsConst>
-				class iterator_t final {
-					node * ptr{nullptr};
+				bucket_list(const Allocator & alloc) noexcept : allocator{alloc} {}
+				bucket_list(const bucket_list &) =delete;
+				auto operator=(const bucket_list &) -> bucket_list & =delete;
+				~bucket_list() noexcept { clear(); }
 
-					friend atomic_forward_list;
-
-					iterator_t(add_const_t<IsConst, std::atomic<node *>> & head) noexcept : ptr{head.load()} {}
-				public:
-					iterator_t() noexcept =default;
-
-					auto operator++() noexcept -> iterator_t & {
-						assert(ptr);
-						ptr = ptr->next;
-						return *this;
-					}
-
-					auto operator*() const noexcept -> add_const_t<IsConst, T> & {
-						assert(ptr);
-						return ptr->value;
-					}
-
-					friend
-					auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs.ptr == rhs.ptr; }
-				};
-
-				atomic_forward_list(const Allocator & alloc) noexcept : allocator{alloc} {}
-				atomic_forward_list(const atomic_forward_list &) =delete;
-				auto operator=(const atomic_forward_list &) -> atomic_forward_list & =delete;
-				~atomic_forward_list() noexcept { clear(); }
-
-				auto local(const auto & init) -> std::tuple<T &, bool> {
-					for(auto ptr{head.load()}; ptr; ptr = ptr->next)
+				auto local(const auto & init) -> std::tuple<node *, bool> {
+					for(auto ptr{head.load()}; ptr; ptr = ptr->bucket_next)
 						if(ptr->owner == std::this_thread::get_id())
-							return {ptr->value, false};
+							return {ptr, false};
 
 					auto ptr{allocator_traits::allocate(allocator, 1)};
 					try {
@@ -77,48 +52,33 @@ namespace p2774 {
 						allocator_traits::deallocate(allocator, ptr, 1);
 						throw;
 					}
-					ptr->next = head.load();
-					while(!head.compare_exchange_weak(ptr->next, ptr));
-					return {ptr->value, true};
+					ptr->bucket_next = head.load();
+					while(!head.compare_exchange_weak(ptr->bucket_next, ptr));
+					return {ptr, true};
 				}
 
 				void clear() noexcept {
 					for(auto ptr{head.exchange(nullptr)}; ptr;) {
 						const auto old{ptr};
-						ptr = ptr->next;
+						ptr = ptr->bucket_next;
 						allocator_traits::destroy(allocator, old);
 						allocator_traits::deallocate(allocator, old, 1);
 					}
 				}
-
-				auto begin() const noexcept -> iterator_t<true> { return head; }
-				auto begin()       noexcept -> iterator_t<false> { return head; }
-				auto end() const noexcept -> iterator_t<true> { return {}; }
-				auto end()       noexcept -> iterator_t<false> { return {}; }
 			};
-			using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<atomic_forward_list>;
+			using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<bucket_list>;
 
-			std::atomic<atomic_forward_list *> buckets;
+			std::atomic<bucket_list *> buckets;
+			std::atomic<node *> root{nullptr}; //non-owning, for fast traversal
 			[[no_unique_address]] typename allocator_traits::allocator_type allocator;
 
 			template<bool IsConst>
 			class iterator_t final {
-				using list_t = add_const_t<IsConst, atomic_forward_list>;
-				list_t * buckets{nullptr};
-				std::size_t index{0};
-				typename atomic_forward_list::template iterator_t<IsConst> it;
+				node * ptr{nullptr};
 
 				friend atomic_unordered_map;
 
-				iterator_t(list_t * buckets) noexcept : buckets{buckets} {
-					if(buckets)
-						for(; index < bucket_count;) {
-							auto & bucket{this->buckets[index]};
-							it = bucket.begin();
-							if(it != bucket.end()) break;
-							++index;
-						}
-				}
+				iterator_t(node * root) noexcept : ptr{root} {}
 			public:
 				using iterator_category = std::forward_iterator_tag;
 				using value_type        = T;
@@ -129,14 +89,7 @@ namespace p2774 {
 				iterator_t() noexcept =default;
 
 				auto operator++() noexcept -> iterator_t & {
-					if(++it == buckets[index].end()) {
-						for(++index; index < bucket_count;) {
-							auto & bucket{buckets[index]};
-							it = bucket.begin();
-							if(it != bucket.end()) break;
-							++index;
-						}
-					}
+					ptr = ptr->list_next;
 					return *this;
 				}
 				auto operator++(int) noexcept -> iterator_t {
@@ -145,11 +98,11 @@ namespace p2774 {
 					return tmp;
 				}
 
-				auto operator*() const noexcept -> reference { return *it; }
+				auto operator*() const noexcept -> reference { return ptr->value; }
 				auto operator->() const noexcept -> pointer { return &**this; }
 
 				friend
-				auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs.it == rhs.it; }
+				auto operator==(const iterator_t & lhs, const iterator_t & rhs) noexcept -> bool { return lhs.ptr == rhs.ptr; }
 			};
 		public:
 			using iterator       = iterator_t<false>;
@@ -175,16 +128,22 @@ namespace p2774 {
 				const auto tid{std::this_thread::get_id()};
 				const auto hash{std::hash<std::thread::id>{}(tid)};
 				const auto ind{hash % bucket_count};
-				return buckets[ind].local(init);
+				auto [node, flag]{buckets[ind].local(init)};
+				if(flag) {
+					node->list_next = root;
+					while(!root.compare_exchange_weak(node->list_next, node));
+				}
+				return {node->value, flag};
 			}
 
 			void clear() noexcept {
 				auto ptr{buckets.load()};
 				for(std::size_t i{0}; i < bucket_count; ++i) ptr[i].clear();
+				root = nullptr;
 			}
 
-			auto begin() const noexcept -> const_iterator { return buckets.load(); }
-			auto begin()       noexcept -> iterator { return buckets.load(); }
+			auto begin() const noexcept -> const_iterator { return root.load(); }
+			auto begin()       noexcept -> iterator { return root.load(); }
 			auto end() const noexcept -> const_iterator { return {}; }
 			auto end()       noexcept -> iterator { return {}; }
 		};
