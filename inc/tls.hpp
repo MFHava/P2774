@@ -30,47 +30,16 @@ namespace p2774 {
 				node * bucket_next{nullptr}, * list_next{nullptr};
 			};
 
-			class bucket_list final {
-				using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<node>;
-				std::atomic<node *> head{nullptr};
-				[[no_unique_address]] typename allocator_traits::allocator_type allocator;
-			public:
-				bucket_list(const Allocator & alloc) noexcept : allocator{alloc} {}
-				bucket_list(const bucket_list &) =delete;
-				auto operator=(const bucket_list &) -> bucket_list & =delete;
-				~bucket_list() noexcept { clear(); }
+			using bucket = std::atomic<node *>;
 
-				auto local(const auto & init) -> std::tuple<node *, bool> {
-					for(auto ptr{head.load()}; ptr; ptr = ptr->bucket_next)
-						if(ptr->owner == std::this_thread::get_id())
-							return {ptr, false};
+			using node_allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<node>;
+			using node_allocator = typename node_allocator_traits::allocator_type;
+			using bucket_allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<bucket>;
+			using bucket_allocator = typename bucket_allocator_traits::allocator_type;
 
-					auto ptr{allocator_traits::allocate(allocator, 1)};
-					try {
-						allocator_traits::construct(allocator, ptr, init);
-					} catch(...) { 
-						allocator_traits::deallocate(allocator, ptr, 1);
-						throw;
-					}
-					ptr->bucket_next = head.load();
-					while(!head.compare_exchange_weak(ptr->bucket_next, ptr));
-					return {ptr, true};
-				}
-
-				void clear() noexcept {
-					for(auto ptr{head.exchange(nullptr)}; ptr;) {
-						const auto old{ptr};
-						ptr = ptr->bucket_next;
-						allocator_traits::destroy(allocator, old);
-						allocator_traits::deallocate(allocator, old, 1);
-					}
-				}
-			};
-			using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<bucket_list>;
-
-			std::atomic<bucket_list *> buckets;
-			std::atomic<node *> root{nullptr}; //non-owning, for fast traversal
-			[[no_unique_address]] typename allocator_traits::allocator_type allocator;
+			bucket * buckets; //non-owning, for fast lookup
+			std::atomic<node *> root; //owning, for fast traversal
+			[[no_unique_address]] Allocator allocator;
 
 			template<bool IsConst>
 			class iterator_t final {
@@ -111,35 +80,54 @@ namespace p2774 {
 			static_assert(std::forward_iterator<const_iterator>);
 
 			atomic_unordered_map(const Allocator & alloc) : allocator{alloc} {
-				auto ptr{allocator_traits::allocate(allocator, bucket_count)};
-				for(std::size_t i{0}; i < bucket_count; ++i) allocator_traits::construct(allocator, ptr + i, allocator);
+				bucket_allocator a{allocator};
+				auto ptr{bucket_allocator_traits::allocate(a, bucket_count)};
+				for(std::size_t i{0}; i < bucket_count; ++i) bucket_allocator_traits::construct(a, ptr + i);
 				buckets = ptr;
 			}
 			atomic_unordered_map(const atomic_unordered_map &) =delete;
 			auto operator=(const atomic_unordered_map &) -> atomic_unordered_map & =delete;
 			~atomic_unordered_map() noexcept {
 				clear();
-				auto ptr{buckets.load()};
-				for(std::size_t i{0}; i < bucket_count; ++i) allocator_traits::destroy(allocator, ptr + i);
-				allocator_traits::deallocate(allocator, ptr, bucket_count);
+				bucket_allocator a{allocator};
+				for(std::size_t i{0}; i < bucket_count; ++i) bucket_allocator_traits::destroy(a, buckets + i);
+				bucket_allocator_traits::deallocate(a, buckets, bucket_count);
 			}
 
 			auto local(const auto & init) -> std::tuple<T &, bool> {
 				const auto tid{std::this_thread::get_id()};
 				const auto hash{std::hash<std::thread::id>{}(tid)};
 				const auto ind{hash % bucket_count};
-				auto [node, flag]{buckets[ind].local(init)};
-				if(flag) {
-					node->list_next = root;
-					while(!root.compare_exchange_weak(node->list_next, node));
+				auto & bucket{buckets[ind]};
+
+				//trying to find existing node
+				for(auto ptr{bucket.load()}; ptr; ptr = ptr->bucket_next)
+					if(ptr->owner == std::this_thread::get_id())
+						return {ptr->value, false};
+
+				//adding new node
+				node_allocator a{allocator};
+				auto node{node_allocator_traits::allocate(a, 1)};
+				try {
+					node_allocator_traits::construct(a, node, init);
+				} catch(...) { 
+					node_allocator_traits::deallocate(a, node, 1);
+					throw;
 				}
-				return {node->value, flag};
+				for(node->bucket_next = bucket.load(); !bucket.compare_exchange_weak(node->bucket_next, node););
+				for(node->list_next = root.load(); !root.compare_exchange_weak(node->list_next, node););
+				return {node->value, true};
 			}
 
 			void clear() noexcept {
-				auto ptr{buckets.load()};
-				for(std::size_t i{0}; i < bucket_count; ++i) ptr[i].clear();
-				root = nullptr;
+				node_allocator a{allocator};
+				for(auto ptr{root.exchange(nullptr)}; ptr;) {
+					const auto old{ptr};
+					ptr = ptr->list_next;
+					node_allocator_traits::destroy(a, old);
+					node_allocator_traits::deallocate(a, old, 1);
+				}
+				for(std::size_t i{0}; i < bucket_count; ++i) buckets[i] = nullptr;
 			}
 
 			auto begin() const noexcept -> const_iterator { return root.load(); }
