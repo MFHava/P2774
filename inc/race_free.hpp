@@ -11,12 +11,16 @@
 #include <type_traits>
 
 namespace p2774 {
-	template<typename T> //TODO: allocator support
+	//! @attention @c Allocator must be thread-safe!
+	template<typename T, typename Allocator = std::allocator<T>>
 	class race_free final {
 		struct node final {
-			std::optional<T> value;
+			std::optional<T> value; //!TODO: would this need to be aware of @c Allocator?
 			node * next{nullptr};
 		};
+
+		using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<node>;
+		using allocator_type = typename allocator_traits::allocator_type;
 
 		class lockfree_stack final {
 			//TODO: 32bit support?
@@ -36,13 +40,7 @@ namespace p2774 {
 			lockfree_stack() noexcept =default;
 			lockfree_stack(const lockfree_stack &) =delete;
 			auto operator=(const lockfree_stack &) -> lockfree_stack & =delete;
-			~lockfree_stack() noexcept {
-				for(auto ptr{top_.head}; ptr;) {
-					auto next{ptr->next};
-					delete ptr;
-					ptr = next;
-				}
-			}
+			~lockfree_stack() noexcept =default;
 
 			auto unsafe_top() const -> node * { return top_.head; }
 
@@ -66,6 +64,7 @@ namespace p2774 {
 		};
 
 		mutable lockfree_stack stack;
+		[[no_unique_address]] mutable allocator_type allocator;
 
 		template<bool IsConst>
 		class iterator_t final {
@@ -164,17 +163,33 @@ namespace p2774 {
 			}
 		};
 
-		race_free() noexcept =default;
+		race_free(Allocator alloc = Allocator{}) noexcept : allocator{alloc} {}
 		race_free(const race_free &) =delete;
 		auto operator=(const race_free &) -> race_free & =delete;
-		~race_free() noexcept =default;
+		~race_free() noexcept {
+			for(auto ptr{stack.unsafe_top()}; ptr;) {
+				auto next{ptr->next};
+				allocator_traits::destroy(allocator, ptr);
+				allocator_traits::deallocate(allocator, ptr, 1);
+				ptr = next;
+			}
+		}
 
 		[[nodiscard]]
 		auto get() const -> handle {
 			//pop from stack or allocate new node if stack is empty
 			for(auto old{stack.load()};;) {
 				const auto & [ptr, tag]{old};
-				if(!ptr) return {&stack, new node}; //need new node
+				if(!ptr) { //need new node
+					auto node{allocator_traits::allocate(allocator, 1)};
+					try {
+						allocator_traits::construct(allocator, node);
+						return {&stack, node};
+					} catch(...) {
+						allocator_traits::deallocate(allocator, node, 1);
+						throw;
+					}
+				}
 				if(stack.compare_exchange(old, {ptr->next, tag + 1}))
 					return {&stack, old.head}; //hand ownership to handle
 			}
