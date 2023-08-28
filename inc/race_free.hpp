@@ -31,6 +31,9 @@ namespace p2774 {
 			mutable struct alignas(16) tagged_ptr final {
 				node * head{nullptr};
 				std::uintptr_t tag{0};
+
+				friend
+				auto operator==(const tagged_ptr &, const tagged_ptr &) noexcept -> bool =default;
 			} top_;
 			static_assert(sizeof(tagged_ptr) == 16);
 #ifndef _WIN32
@@ -49,7 +52,8 @@ namespace p2774 {
 #ifdef _WIN32
 				(void)_InterlockedCompareExchange128(reinterpret_cast<long long *>(&top_), 0, 0, reinterpret_cast<long long *>(&result)); //there is no other 128bit interlocked operation?!
 #else
-				__atomic_load(&top_, &result, __ATOMIC_SEQ_CST);
+				const auto tmp{__sync_fetch_and_or(reinterpret_cast<__uint128_t *>(&top_), 0)};
+				result = *reinterpret_cast<const tagged_ptr *>(&tmp);
 #endif
 				return result;
 			}
@@ -58,7 +62,10 @@ namespace p2774 {
 #ifdef _WIN32
 				return _InterlockedCompareExchange128(reinterpret_cast<long long *>(&top_), desired.tag, reinterpret_cast<long long>(desired.head), reinterpret_cast<long long *>(&expected)) == 1;
 #else
-				return __atomic_compare_exchange(&top_, &expected, &desired, true, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+				const auto old_expected{expected};
+				const auto old{__sync_val_compare_and_swap(reinterpret_cast<__uint128_t *>(&top_), *reinterpret_cast<__uint128_t *>(&expected), *reinterpret_cast<__uint128_t *>(&desired))};
+				expected = *reinterpret_cast<const tagged_ptr *>(&old);
+				return expected == old_expected;
 #endif
 			}
 		};
