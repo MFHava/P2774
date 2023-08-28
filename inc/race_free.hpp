@@ -53,9 +53,9 @@ namespace p2774 {
 			auto load() const -> tagged_ptr {
 				tagged_ptr result{nullptr, 0};
 #ifdef _WIN32
-				(void)_InterlockedCompareExchange128(reinterpret_cast<long long *>(&top_), 0, 0, reinterpret_cast<long long *>(&result)); //there is no other 128bit interlocked operation?!
+				(void)_InterlockedCompareExchange128(reinterpret_cast<long long *>(&top_), 0, 0, reinterpret_cast<long long *>(&result));
 #else
-				const auto tmp{__sync_fetch_and_or(reinterpret_cast<__uint128_t *>(&top_), 0)};
+				const auto tmp{__sync_val_compare_and_swap(reinterpret_cast<__uint128_t *>(&top_), 0, 0)};
 				result = *reinterpret_cast<const tagged_ptr *>(&tmp);
 #endif
 				return result;
