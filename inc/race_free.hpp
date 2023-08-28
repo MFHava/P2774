@@ -6,6 +6,9 @@
 
 #pragma once
 #include <atomic>
+#include <memory>
+#include <cstdint>
+#include <utility>
 #include <optional>
 #include <concepts>
 #include <type_traits>
