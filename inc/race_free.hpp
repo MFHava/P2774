@@ -5,7 +5,7 @@
 //          http://www.boost.org/LICENSE_1_0.txt)
 
 #pragma once
-#include <atomic>
+#include <bit>
 #include <memory>
 #include <cstdint>
 #include <utility>
@@ -27,7 +27,6 @@ namespace p2774 {
 
 		class lockfree_stack final {
 			//TODO: 32bit support?
-			//TODO: check whether all these hacky reinterpret_casts can be easily avoided...
 			static_assert(sizeof(void *) == 8);
 			static_assert(sizeof(void *) == sizeof(long long));
 
@@ -51,24 +50,22 @@ namespace p2774 {
 			auto unsafe_top() const -> node * { return top_.head; }
 
 			auto load() const -> tagged_ptr {
-				tagged_ptr result{nullptr, 0};
 #ifdef _WIN32
-				(void)_InterlockedCompareExchange128(reinterpret_cast<long long *>(&top_), 0, 0, reinterpret_cast<long long *>(&result));
-#else
-				const auto tmp{__sync_val_compare_and_swap(reinterpret_cast<__uint128_t *>(&top_), 0, 0)};
-				result = *reinterpret_cast<const tagged_ptr *>(&tmp);
-#endif
+				tagged_ptr result{nullptr, 0};
+				(void)_InterlockedCompareExchange128(std::bit_cast<long long *>(&top_), 0, 0, std::bit_cast<long long *>(&result));
 				return result;
+#else
+				return std::bit_cast<tagged_ptr>(__sync_val_compare_and_swap(std::bit_cast<__uint128_t *>(&top_), 0, 0));
+#endif
 			}
 
 			auto compare_exchange(tagged_ptr & expected, tagged_ptr desired) noexcept -> bool {
 #ifdef _WIN32
-				return _InterlockedCompareExchange128(reinterpret_cast<long long *>(&top_), desired.tag, reinterpret_cast<long long>(desired.head), reinterpret_cast<long long *>(&expected)) == 1;
+				return _InterlockedCompareExchange128(std::bit_cast<long long *>(&top_), std::bit_cast<long long>(desired.tag), std::bit_cast<long long>(desired.head), std::bit_cast<long long *>(&expected)) == 1;
 #else
-				const auto old_expected{expected};
-				const auto old{__sync_val_compare_and_swap(reinterpret_cast<__uint128_t *>(&top_), *reinterpret_cast<__uint128_t *>(&expected), *reinterpret_cast<__uint128_t *>(&desired))};
-				expected = *reinterpret_cast<const tagged_ptr *>(&old);
-				return expected == old_expected;
+				const auto old{expected};
+				expected = std::bit_cast<tagged_ptr>(__sync_val_compare_and_swap(std::bit_cast<__uint128_t *>(&top_), std::bit_cast<__uint128_t>(expected), std::bit_cast<__uint128_t>(desired)));
+				return expected == old;
 #endif
 			}
 		};
