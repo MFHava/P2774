@@ -24,13 +24,18 @@ namespace p2774 {
 
 		static
 		constexpr
-		std::size_t nodes_per_block{4};
+		std::size_t max_block_size{512};
+
+		static
+		constexpr
+		std::size_t nodes_per_block{(max_block_size - sizeof(void *)) / sizeof(node)};
 		static_assert(nodes_per_block > 1);
 
 		struct block final {
 			block * next{nullptr};
 			node nodes[nodes_per_block]; //! @todo flexible array members would be nice here...
 		};
+		static_assert(sizeof(block) <= max_block_size);
 
 		using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<block>;
 		using allocator_type = typename allocator_traits::allocator_type;
