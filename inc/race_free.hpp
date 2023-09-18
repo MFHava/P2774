@@ -11,22 +11,32 @@
 #include <utility>
 #include <optional>
 #include <concepts>
+#include <semaphore>
 #include <type_traits>
 
 namespace p2774 {
-	//! @attention @c Allocator must be thread-safe!
 	template<typename T, typename Allocator = std::allocator<T>>
 	class race_free final {
 		struct node final {
-			std::optional<T> value; //!TODO: would this need to be aware of @c Allocator?
+			std::optional<T> value; //! @todo would this need to be aware of @c Allocator?
 			node * next{nullptr};
 		};
 
-		using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<node>;
+		static
+		constexpr
+		std::size_t nodes_per_block{4};
+		static_assert(nodes_per_block > 1);
+
+		struct block final {
+			block * next{nullptr};
+			node nodes[nodes_per_block]; //! @todo flexible array members would be nice here...
+		};
+
+		using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<block>;
 		using allocator_type = typename allocator_traits::allocator_type;
 
 		class lockfree_stack final {
-			//TODO: 32bit support?
+			//! @todo 32bit support?
 			static_assert(sizeof(void *) == 8);
 			static_assert(sizeof(void *) == sizeof(long long));
 
@@ -46,8 +56,6 @@ namespace p2774 {
 			lockfree_stack(const lockfree_stack &) =delete;
 			auto operator=(const lockfree_stack &) -> lockfree_stack & =delete;
 			~lockfree_stack() noexcept =default;
-
-			auto unsafe_top() const -> node * { return top_.head; }
 
 			auto load() const -> tagged_ptr {
 #ifdef _WIN32
@@ -71,15 +79,26 @@ namespace p2774 {
 		};
 
 		mutable lockfree_stack stack;
+		mutable block * blocks{nullptr};
+		mutable std::binary_semaphore lock{1};
 		[[no_unique_address]] mutable allocator_type allocator;
 
 		template<bool IsConst>
 		class iterator_t final {
-			node * ptr{nullptr};
+			block * ptr{nullptr};
+			std::size_t index{0};
 
 			friend race_free;
 
-			iterator_t(node * head) noexcept : ptr{head} { for(; ptr && !ptr->value; ptr = ptr->next); }
+			iterator_t(block * ptr) noexcept : ptr{ptr} {
+				for(; ptr && !ptr->nodes[index].value;) {
+					++index;
+					if(index == nodes_per_block) {
+						ptr = ptr->next;
+						index = 0;
+					}
+				}
+			}
 		public:
 			using iterator_category = std::forward_iterator_tag;
 			using value_type        = T;
@@ -91,7 +110,13 @@ namespace p2774 {
 
 			auto operator++() noexcept -> iterator_t & {
 				assert(ptr);
-				for(ptr = ptr->next; ptr && !ptr->value; ptr = ptr->next);
+				do {
+					++index;
+					if(index == nodes_per_block) {
+						ptr = ptr->next;
+						index = 0;
+					}
+				} while(ptr && !ptr->nodes[index].value);
 				return *this;
 			}
 			auto operator++(int) noexcept -> iterator_t {
@@ -102,8 +127,8 @@ namespace p2774 {
 
 			auto operator*() const noexcept -> reference {
 				assert(ptr);
-				assert(ptr->value);
-				return *ptr->value;
+				assert(ptr->nodex[index].value);
+				return *ptr->nodes[index].value;
 			}
 			auto operator->() const noexcept -> pointer { return &**this; }
 
@@ -164,7 +189,7 @@ namespace p2774 {
 				return ptr->value.emplace(ilist, std::forward<Args>(args)...);
 			}
 
-			void reset() noexcept { //TODO: needed?!
+			void reset() noexcept { //! @todo needed?!
 				assert(owner);
 				ptr->value.reset();
 			}
@@ -174,7 +199,7 @@ namespace p2774 {
 		race_free(const race_free &) =delete;
 		auto operator=(const race_free &) -> race_free & =delete;
 		~race_free() noexcept {
-			for(auto ptr{stack.unsafe_top()}; ptr;) {
+			for(auto ptr{blocks}; ptr;) {
 				auto next{ptr->next};
 				allocator_traits::destroy(allocator, ptr);
 				allocator_traits::deallocate(allocator, ptr, 1);
@@ -185,27 +210,48 @@ namespace p2774 {
 		[[nodiscard]]
 		auto get() const -> handle {
 			//pop from stack or allocate new node if stack is empty
-			for(auto old{stack.load()};;) {
-				const auto & [ptr, tag]{old};
-				if(!ptr) { //need new node
-					auto node{allocator_traits::allocate(allocator, 1)};
-					try {
-						allocator_traits::construct(allocator, node);
-						return {&stack, node};
-					} catch(...) {
-						allocator_traits::deallocate(allocator, node, 1);
-						throw;
-					}
-				}
-				if(stack.compare_exchange(old, {ptr->next, tag + 1}))
+			auto old{stack.load()};
+			for(; old.head;) {
+retry: //jump here for retry as we already know that head is valid...
+				if(stack.compare_exchange(old, {old.head->next, old.tag + 1}))
 					return {&stack, old.head}; //hand ownership to handle
+			}
+
+			//may need new node
+			const class guard final {
+				std::binary_semaphore & lock;
+			public:
+				guard(std::binary_semaphore & lock) noexcept : lock{lock} { lock.acquire(); }
+				~guard() noexcept { lock.release(); }
+			} guard{lock};
+			if((old = stack.load()).head) goto retry; //since trying to acquire lock, memory has become available
+
+			//actually need new node
+			auto block{allocator_traits::allocate(allocator, 1)};
+			try {
+				allocator_traits::construct(allocator, block);
+
+				//register block & link new nodes
+				block->next = blocks;
+				blocks = block;
+				for(std::size_t i{1}; i < nodes_per_block; ++i) block->nodes[i].next = block->nodes + i + 1;
+
+				//insert new nodes into stack
+				do { block->nodes[nodes_per_block - 1].next = old.head; }
+				while(!stack.compare_exchange(old, {block->nodes + 1, old.tag + 1}));
+
+				return {&stack, block->nodes}; //we kept the first node for ourselves
+			} catch(...) {
+				allocator_traits::deallocate(allocator, block, 1);
+				throw;
 			}
 		}
 
 		auto reset() noexcept {
 			//resets all nodes, does not release memory!
-			for(auto ptr{stack.unsafe_top()}; ptr; ptr = ptr->next)
-				ptr->value.reset();
+			for(auto ptr{blocks}; ptr; ptr = ptr->next)
+				for(auto & node : ptr->nodes)
+					node.value.reset();
 		}
 
 		//! @name Iteration
@@ -216,13 +262,32 @@ namespace p2774 {
 		using const_iterator = iterator_t<true>;
 		static_assert(std::forward_iterator<const_iterator>);
 
-		auto begin() const noexcept -> const_iterator { return stack.unsafe_top(); }
-		auto begin()       noexcept -> iterator { return stack.unsafe_top(); }
+		auto begin() const noexcept -> const_iterator { return blocks; }
+		auto begin()       noexcept -> iterator { return blocks; }
 		auto end() const noexcept -> const_iterator { return {}; }
 		auto end()       noexcept -> iterator { return {}; }
 
 		auto cbegin() const noexcept -> const_iterator { return begin(); }
 		auto cend() const noexcept -> const_iterator { return end(); }
+		//! @}
+
+
+		//! @name Debugging
+		//! @{
+		auto block_count() const noexcept -> std::size_t {
+			std::size_t count{0};
+			for(auto ptr{blocks}; ptr; ptr = ptr->next) ++count;
+			return count;
+		}
+
+		auto node_count() const noexcept -> std::size_t {
+			std::size_t count{0};
+			for(auto ptr{blocks}; ptr; ptr = ptr->next)
+				for(auto & node : ptr->nodes)
+					if(node.value)
+						++count;
+			return count;
+		}
 		//! @}
 	};
 }

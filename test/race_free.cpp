@@ -24,10 +24,11 @@ TEST_CASE("race_free", "[race_free]") {
 		else *handle += val;
 	});
 
-	const auto count{std::distance(tls.begin(), tls.end())};
-	std::cout << "tls entries: " << count << "\n";
 	const auto value{std::accumulate(tls.begin(), tls.end(), std::size_t{0})};
 	REQUIRE(value == reference);
+
+	std::cout << "block count: " << tls.block_count() << "\n";
+	std::cout << "node count: " << tls.node_count() << "\n";
 }
 
 //TODO: further tests
