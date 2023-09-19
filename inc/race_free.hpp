@@ -175,11 +175,11 @@ namespace p2774 {
 				return ptr->value.has_value();
 			}
 
-			auto operator*() noexcept -> T & {
+			auto operator*() const noexcept -> T & {
 				assert(owner);
 				return *ptr->value;
 			}
-			auto operator->() noexcept -> T * { return &**this; }
+			auto operator->() const noexcept -> T * { return &**this; }
 
 			template<typename... Args>
 			requires std::is_constructible_v<T, Args...>
