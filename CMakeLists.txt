@@ -16,7 +16,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Catch2 CONFIG REQUIRED)
 
 add_executable(p2774)
-	file(GLOB_RECURSE SRC "inc/*" "test/*")
+	file(GLOB_RECURSE SRC "inc/*" "src/*" "test/*")
 		source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${SRC})
 	target_sources(p2774 PRIVATE ${SRC})
 	target_include_directories(p2774 PRIVATE "inc")

@@ -7,6 +7,7 @@
 #pragma once
 #include <bit>
 #include <memory>
+#include <cassert>
 #include <cstdint>
 #include <utility>
 #include <optional>
@@ -15,6 +16,35 @@
 #include <type_traits>
 
 namespace p2774 {
+	namespace internal {
+		class lockfree_stack final {
+			//! @todo 32bit support?
+			static_assert(sizeof(void *) == 8);
+
+			mutable struct alignas(16) tagged_ptr final {
+				void * head{nullptr};
+				std::uintptr_t tag{0};
+
+				friend
+				auto operator==(const tagged_ptr &, const tagged_ptr &) noexcept -> bool =default;
+			} top_;
+			static_assert(sizeof(tagged_ptr) == 16);
+		public:
+			lockfree_stack() noexcept =default;
+			lockfree_stack(const lockfree_stack &) =delete;
+			auto operator=(const lockfree_stack &) -> lockfree_stack & =delete;
+			~lockfree_stack() noexcept =default;
+
+			auto load() const -> tagged_ptr;
+			auto compare_exchange(tagged_ptr & expected, tagged_ptr desired) noexcept -> bool;
+		};
+
+
+		inline
+		constexpr
+		std::size_t max_block_size{512}; //! @todo optimal size?
+	}
+
 	template<typename T, typename Allocator = std::allocator<T>>
 	class race_free final {
 		struct node final {
@@ -24,66 +54,19 @@ namespace p2774 {
 
 		static
 		constexpr
-		std::size_t max_block_size{512}; //! @todo optimal size?
-
-		static
-		constexpr
-		std::size_t nodes_per_block{(max_block_size - sizeof(void *)) / sizeof(node)};
+		std::size_t nodes_per_block{(internal::max_block_size - sizeof(void *)) / sizeof(node)};
 		static_assert(nodes_per_block > 1);
 
 		struct block final {
 			block * next{nullptr};
 			node nodes[nodes_per_block];
 		};
-		static_assert(sizeof(block) <= max_block_size);
+		static_assert(sizeof(block) <= internal::max_block_size);
 
 		using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<block>;
 		using allocator_type = typename allocator_traits::allocator_type;
 
-		class lockfree_stack final {
-			//! @todo 32bit support?
-			static_assert(sizeof(void *) == 8);
-			static_assert(sizeof(void *) == sizeof(long long));
-
-			mutable struct alignas(16) tagged_ptr final {
-				node * head{nullptr};
-				std::uintptr_t tag{0};
-
-				friend
-				auto operator==(const tagged_ptr &, const tagged_ptr &) noexcept -> bool =default;
-			} top_;
-			static_assert(sizeof(tagged_ptr) == 16);
-#ifndef _WIN32
-			static_assert(sizeof(__uint128_t) == sizeof(tagged_ptr));
-#endif
-		public:
-			lockfree_stack() noexcept =default;
-			lockfree_stack(const lockfree_stack &) =delete;
-			auto operator=(const lockfree_stack &) -> lockfree_stack & =delete;
-			~lockfree_stack() noexcept =default;
-
-			auto load() const -> tagged_ptr {
-#ifdef _WIN32
-				tagged_ptr result{nullptr, 0};
-				(void)_InterlockedCompareExchange128(std::bit_cast<long long *>(&top_), 0, 0, std::bit_cast<long long *>(&result));
-				return result;
-#else
-				return std::bit_cast<tagged_ptr>(__sync_val_compare_and_swap(std::bit_cast<__uint128_t *>(&top_), 0, 0));
-#endif
-			}
-
-			auto compare_exchange(tagged_ptr & expected, tagged_ptr desired) noexcept -> bool {
-#ifdef _WIN32
-				return _InterlockedCompareExchange128(std::bit_cast<long long *>(&top_), std::bit_cast<long long>(desired.tag), std::bit_cast<long long>(desired.head), std::bit_cast<long long *>(&expected)) == 1;
-#else
-				const auto old{expected};
-				expected = std::bit_cast<tagged_ptr>(__sync_val_compare_and_swap(std::bit_cast<__uint128_t *>(&top_), std::bit_cast<__uint128_t>(expected), std::bit_cast<__uint128_t>(desired)));
-				return expected == old;
-#endif
-			}
-		};
-
-		mutable lockfree_stack stack;
+		mutable internal::lockfree_stack stack;
 		mutable block * blocks{nullptr};
 		mutable std::binary_semaphore lock{1};
 		[[no_unique_address]] mutable allocator_type allocator;
@@ -144,10 +127,10 @@ namespace p2774 {
 		class handle final {
 			friend race_free;
 
-			lockfree_stack * owner{nullptr};
+			internal::lockfree_stack * owner{nullptr};
 			node * ptr;
 
-			handle(lockfree_stack * owner, node * ptr) noexcept : owner{owner}, ptr{ptr} {}
+			handle(internal::lockfree_stack * owner, node * ptr) noexcept : owner{owner}, ptr{ptr} {}
 		public:
 			handle(const handle &) =delete;
 			handle(handle && other) noexcept : owner{std::exchange(other.owner, nullptr)}, ptr{other.ptr} {} //moved-from state is valid but unspecified!
@@ -163,7 +146,7 @@ namespace p2774 {
 
 				//push to stack
 				for(auto old{owner->load()};;) {
-					ptr->next = old.head;
+					ptr->next = static_cast<node *>(old.head);
 					if(owner->compare_exchange(old, {ptr, old.tag + 1}))
 						break; //inserted
 				}
@@ -179,7 +162,7 @@ namespace p2774 {
 				assert(owner);
 				return *ptr->value;
 			}
-			auto operator->() const noexcept -> T * { return &**this; }
+			auto operator->() const noexcept -> T * { return std::addressof(**this); }
 
 			template<typename... Args>
 			requires std::is_constructible_v<T, Args...>
@@ -200,7 +183,7 @@ namespace p2774 {
 			}
 		};
 
-		race_free(Allocator alloc = Allocator{}) noexcept : allocator{alloc} {}
+		race_free(const Allocator & alloc = Allocator{}) noexcept : allocator{alloc} {}
 		race_free(const race_free &) =delete;
 		auto operator=(const race_free &) -> race_free & =delete;
 		~race_free() noexcept {
@@ -218,8 +201,8 @@ namespace p2774 {
 			auto old{stack.load()};
 			for(; old.head;) {
 retry: //jump here for retry as we already know that head is valid...
-				if(stack.compare_exchange(old, {old.head->next, old.tag + 1}))
-					return {&stack, old.head}; //hand ownership to handle
+				if(stack.compare_exchange(old, {static_cast<node *>(old.head)->next, old.tag + 1}))
+					return {&stack, static_cast<node *>(old.head)}; //hand ownership to handle
 			}
 
 			//may need new node
@@ -242,7 +225,7 @@ retry: //jump here for retry as we already know that head is valid...
 				for(std::size_t i{1}; i < nodes_per_block; ++i) block->nodes[i].next = block->nodes + i + 1;
 
 				//insert new nodes into stack
-				do { block->nodes[nodes_per_block - 1].next = old.head; }
+				do { block->nodes[nodes_per_block - 1].next = static_cast<node *>(old.head); }
 				while(!stack.compare_exchange(old, {block->nodes + 1, old.tag + 1}));
 
 				return {&stack, block->nodes}; //we kept the first node for ourselves
