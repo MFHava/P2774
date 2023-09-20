@@ -24,7 +24,7 @@ namespace p2774 {
 
 		static
 		constexpr
-		std::size_t max_block_size{512};
+		std::size_t max_block_size{512}; //! @todo optimal size?
 
 		static
 		constexpr
@@ -33,7 +33,7 @@ namespace p2774 {
 
 		struct block final {
 			block * next{nullptr};
-			node nodes[nodes_per_block]; //! @todo flexible array members would be nice here...
+			node nodes[nodes_per_block];
 		};
 		static_assert(sizeof(block) <= max_block_size);
 
@@ -135,7 +135,7 @@ namespace p2774 {
 				assert(ptr->nodex[index].value);
 				return *ptr->nodes[index].value;
 			}
-			auto operator->() const noexcept -> pointer { return &**this; }
+			auto operator->() const noexcept -> pointer { return std::addressof(**this); }
 
 			friend
 			auto operator==(const iterator_t &, const iterator_t &) noexcept -> bool =default;
@@ -194,7 +194,7 @@ namespace p2774 {
 				return ptr->value.emplace(ilist, std::forward<Args>(args)...);
 			}
 
-			void reset() noexcept { //! @todo needed?!
+			void reset() noexcept {
 				assert(owner);
 				ptr->value.reset();
 			}
@@ -261,6 +261,7 @@ retry: //jump here for retry as we already know that head is valid...
 
 		//! @name Iteration
 		//! @note only yields iterators that actually contain a value!
+		//! @todo can we statically prevent users from calling this whilst there are active handles?!
 		//! @{
 		using iterator       = iterator_t<false>;
 		static_assert(std::forward_iterator<iterator>);
