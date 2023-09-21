@@ -20,8 +20,7 @@ TEST_CASE("race_free", "[race_free]") {
 	p2774::race_free<std::size_t> tls;
 	std::for_each(std::execution::par, std::begin(values), std::end(values), [&](auto val) {
 		auto handle{tls.get()};
-		if(!handle) handle.emplace(val);
-		else *handle += val;
+		*handle += val;
 	});
 
 	const auto value{std::accumulate(tls.begin(), tls.end(), std::size_t{0})};

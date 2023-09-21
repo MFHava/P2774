@@ -10,7 +10,6 @@
 #include <cassert>
 #include <cstdint>
 #include <utility>
-#include <optional>
 #include <concepts>
 #include <semaphore>
 #include <type_traits>
@@ -45,10 +44,10 @@ namespace p2774 {
 		std::size_t max_block_size{512}; //! @todo optimal size?
 	}
 
-	template<typename T, typename Allocator = std::allocator<T>>
+	template<std::default_initializable T, typename Allocator = std::allocator<T>>
 	class race_free final {
 		struct node final {
-			std::optional<T> value; //! @todo would this need to be aware of @c Allocator?
+			T value{};
 			node * next{nullptr};
 		};
 
@@ -78,15 +77,7 @@ namespace p2774 {
 
 			friend race_free;
 
-			iterator_t(block * ptr) noexcept : ptr{ptr} {
-				for(; ptr && !ptr->nodes[index].value;) {
-					++index;
-					if(index == nodes_per_block) {
-						ptr = ptr->next;
-						index = 0;
-					}
-				}
-			}
+			iterator_t(block * ptr) noexcept : ptr{ptr} {}
 		public:
 			using iterator_category = std::forward_iterator_tag;
 			using value_type        = T;
@@ -98,13 +89,11 @@ namespace p2774 {
 
 			auto operator++() noexcept -> iterator_t & {
 				assert(ptr);
-				do {
-					++index;
-					if(index == nodes_per_block) {
-						ptr = ptr->next;
-						index = 0;
-					}
-				} while(ptr && !ptr->nodes[index].value);
+				++index;
+				if(index == nodes_per_block) {
+					ptr = ptr->next;
+					index = 0;
+				}
 				return *this;
 			}
 			auto operator++(int) noexcept -> iterator_t {
@@ -115,8 +104,7 @@ namespace p2774 {
 
 			auto operator*() const noexcept -> reference {
 				assert(ptr);
-				assert(ptr->nodex[index].value);
-				return *ptr->nodes[index].value;
+				return ptr->nodes[index].value;
 			}
 			auto operator->() const noexcept -> pointer { return std::addressof(**this); }
 
@@ -146,21 +134,9 @@ namespace p2774 {
 				}
 			}
 
-			explicit
-			operator bool() const noexcept { return ptr->value.has_value(); }
-
-			auto operator*() const noexcept -> T & { return *ptr->value; }
+			auto operator*() const noexcept -> T & { return ptr->value; }
 			auto operator->() const noexcept -> T * { return get(); }
 			auto get() const noexcept -> T *{ return std::addressof(**this); }
-
-			template<typename... Args>
-			requires std::is_constructible_v<T, Args...>
-			auto emplace(Args &&... args) noexcept(std::is_nothrow_constructible_v<T, Args...>) -> T & { return ptr->value.emplace(std::forward<Args>(args)...); }
-			template<typename U, typename... Args>
-			requires std::is_constructible_v<T, std::initializer_list<U>, Args...>
-			auto emplace(std::initializer_list<U> ilist, Args &&... args) noexcept(std::is_nothrow_constructible_v<T, std::initializer_list<U>, Args...>) -> T & { return ptr->value.emplace(ilist, std::forward<Args>(args)...); }
-
-			void reset() noexcept { ptr->value.reset(); }
 		};
 
 		race_free(const Allocator & alloc = Allocator{}) noexcept : allocator{alloc} {}
@@ -215,13 +191,6 @@ retry: //jump here for retry as we already know that head is valid...
 			}
 		}
 
-		auto reset() noexcept {
-			//resets all nodes, does not release memory!
-			for(auto ptr{blocks}; ptr; ptr = ptr->next)
-				for(auto & node : ptr->nodes)
-					node.value.reset();
-		}
-
 		//! @name Iteration
 		//! @note only yields iterators that actually contain a value!
 		//! @todo can we statically prevent users from calling this whilst there are active handles?!
@@ -250,12 +219,7 @@ retry: //jump here for retry as we already know that head is valid...
 		}
 
 		auto node_count() const noexcept -> std::size_t {
-			std::size_t count{0};
-			for(auto ptr{blocks}; ptr; ptr = ptr->next)
-				for(auto & node : ptr->nodes)
-					if(node.value)
-						++count;
-			return count;
+			return block_count() * nodes_per_block;
 		}
 		//! @}
 	};
