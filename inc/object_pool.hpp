@@ -152,7 +152,7 @@ namespace p2774 {
 		}
 
 		[[nodiscard]]
-		auto get() const -> handle {
+		auto lease() const -> handle {
 			//pop from stack or allocate new node if stack is empty
 			auto old{stack.load()};
 			for(; old.head;) {

@@ -19,8 +19,7 @@ TEST_CASE("object_pool", "[object_pool]") {
 
 	p2774::object_pool<std::size_t> tls;
 	std::for_each(std::execution::par, std::begin(values), std::end(values), [&](auto val) {
-		auto handle{tls.get()};
-		*handle += val;
+		*tls.lease() += val;
 	});
 
 	const auto value{std::accumulate(tls.begin(), tls.end(), std::size_t{0})};
