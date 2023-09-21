@@ -15,6 +15,9 @@
 #include <type_traits>
 
 namespace p2774 {
+	template<std::default_initializable T, typename Allocator>
+	class object_pool;
+
 	namespace internal {
 		class lockfree_stack final {
 			//! @todo 32bit support?
@@ -42,61 +45,45 @@ namespace p2774 {
 		inline
 		constexpr
 		std::size_t max_block_size{512}; //! @todo optimal size?
-	}
 
-	template<std::default_initializable T, typename Allocator = std::allocator<T>>
-	class object_pool final {
+		template<typename T>
 		struct node final {
 			T value{};
 			node * next{nullptr};
 		};
 
-		static
+		template<typename T>
 		constexpr
-		std::size_t nodes_per_block{(internal::max_block_size - sizeof(void *)) / sizeof(node)};
-		static_assert(nodes_per_block > 1);
+		std::size_t nodes_per_block{(internal::max_block_size - sizeof(void *)) / sizeof(node<T>)};
 
+		template<typename T>
 		struct block final {
 			block * next{nullptr};
-			node nodes[nodes_per_block];
+			static_assert(nodes_per_block<T> > 1);
+			node<T> nodes[nodes_per_block<T>];
 		};
-		static_assert(sizeof(block) <= internal::max_block_size);
 
-		using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<block>;
-		using allocator_type = typename allocator_traits::allocator_type;
 
-		mutable internal::lockfree_stack stack;
-		mutable block * blocks{nullptr};
-		mutable std::binary_semaphore lock{1};
-		[[no_unique_address]] mutable allocator_type allocator;
-
-		template<bool IsConst>
-		class iterator_t final {
-			block * ptr{nullptr};
-			std::size_t index{0};
-
-			friend object_pool;
-
-			iterator_t(block * ptr) noexcept : ptr{ptr} {}
-		public:
+		template<typename T>
+		struct iterator final {
 			using iterator_category = std::forward_iterator_tag;
-			using value_type        = T;
+			using value_type        = std::remove_const_t<T>;
 			using difference_type   = std::ptrdiff_t;
-			using pointer           = std::conditional_t<IsConst, const T, T> *;
-			using reference         = std::conditional_t<IsConst, const T, T> &;
+			using pointer           = T *;
+			using reference         = T &;
 
-			iterator_t() noexcept =default;
+			iterator() noexcept =default;
 
-			auto operator++() noexcept -> iterator_t & {
+			auto operator++() noexcept -> iterator & {
 				assert(ptr);
 				++index;
-				if(index == nodes_per_block) {
+				if(index == internal::nodes_per_block<value_type>) {
 					ptr = ptr->next;
 					index = 0;
 				}
 				return *this;
 			}
-			auto operator++(int) noexcept -> iterator_t {
+			auto operator++(int) noexcept -> iterator {
 				auto tmp{*this};
 				++*this;
 				return tmp;
@@ -109,16 +96,29 @@ namespace p2774 {
 			auto operator->() const noexcept -> pointer { return std::addressof(**this); }
 
 			friend
-			auto operator==(const iterator_t &, const iterator_t &) noexcept -> bool =default;
+			auto operator==(const iterator &, const iterator &) noexcept -> bool =default;
+		private:
+			template<std::default_initializable U, typename Allocator>
+			friend
+			class p2774::object_pool;
+
+			iterator(block<value_type> * ptr) noexcept : ptr{ptr} {}
+
+			block<value_type> * ptr{nullptr};
+			std::size_t index{0};
 		};
-	public:
+
+
+		template<typename T>
 		class handle final {
-			friend object_pool;
+			template<std::default_initializable U, typename Allocator>
+			friend
+			class p2774::object_pool;
 
 			internal::lockfree_stack & owner;
-			node * ptr;
+			node<T> * ptr;
 
-			handle(internal::lockfree_stack & owner, node * ptr) noexcept : owner{owner}, ptr{ptr} {}
+			handle(internal::lockfree_stack & owner, node<T> * ptr) noexcept : owner{owner}, ptr{ptr} {}
 		public:
 			handle(const handle &) =delete;
 			handle(handle && other) noexcept =delete;
@@ -128,7 +128,7 @@ namespace p2774 {
 			~handle() noexcept {
 				//push to stack
 				for(auto old{owner.load()};;) {
-					ptr->next = static_cast<node *>(old.head);
+					ptr->next = static_cast<node<T> *>(old.head);
 					if(owner.compare_exchange(old, {ptr, old.tag + 1}))
 						break; //inserted
 				}
@@ -138,6 +138,21 @@ namespace p2774 {
 			auto operator->() const noexcept -> T * { return get(); }
 			auto get() const noexcept -> T *{ return std::addressof(**this); }
 		};
+	}
+
+	template<std::default_initializable T, typename Allocator = std::allocator<T>>
+	class object_pool final {
+		using node = internal::node<T>;
+		using block = internal::block<T>;
+		using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<block>;
+		using allocator_type = typename allocator_traits::allocator_type;
+
+		mutable internal::lockfree_stack stack;
+		mutable block * blocks{nullptr};
+		mutable std::binary_semaphore lock{1};
+		[[no_unique_address]] mutable allocator_type allocator;
+	public:
+		using handle = internal::handle<T>;
 
 		object_pool(const Allocator & alloc = Allocator{}) noexcept : allocator{alloc} {}
 		object_pool(const object_pool &) =delete;
@@ -178,10 +193,10 @@ retry: //jump here for retry as we already know that head is valid...
 				//register block & link new nodes
 				block->next = blocks;
 				blocks = block;
-				for(std::size_t i{1}; i < nodes_per_block; ++i) block->nodes[i].next = block->nodes + i + 1;
+				for(std::size_t i{1}; i < internal::nodes_per_block<T>; ++i) block->nodes[i].next = block->nodes + i + 1;
 
 				//insert new nodes into stack
-				do { block->nodes[nodes_per_block - 1].next = static_cast<node *>(old.head); }
+				do { block->nodes[internal::nodes_per_block<T> - 1].next = static_cast<node *>(old.head); }
 				while(!stack.compare_exchange(old, {block->nodes + 1, old.tag + 1}));
 
 				return {stack, block->nodes}; //we kept the first node for ourselves
@@ -195,9 +210,9 @@ retry: //jump here for retry as we already know that head is valid...
 		//! @note only yields iterators that actually contain a value!
 		//! @todo can we statically prevent users from calling this whilst there are active handles?!
 		//! @{
-		using iterator       = iterator_t<false>;
+		using iterator       = internal::iterator<T>;
 		static_assert(std::forward_iterator<iterator>);
-		using const_iterator = iterator_t<true>;
+		using const_iterator = internal::iterator<const T>;
 		static_assert(std::forward_iterator<const_iterator>);
 
 		auto begin() const noexcept -> const_iterator { return blocks; }
@@ -219,7 +234,7 @@ retry: //jump here for retry as we already know that head is valid...
 		}
 
 		auto node_count() const noexcept -> std::size_t {
-			return block_count() * nodes_per_block;
+			return block_count() * internal::nodes_per_block<T>;
 		}
 		//! @}
 	};
