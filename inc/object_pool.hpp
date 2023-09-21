@@ -45,7 +45,7 @@ namespace p2774 {
 	}
 
 	template<std::default_initializable T, typename Allocator = std::allocator<T>>
-	class race_free final {
+	class object_pool final {
 		struct node final {
 			T value{};
 			node * next{nullptr};
@@ -75,7 +75,7 @@ namespace p2774 {
 			block * ptr{nullptr};
 			std::size_t index{0};
 
-			friend race_free;
+			friend object_pool;
 
 			iterator_t(block * ptr) noexcept : ptr{ptr} {}
 		public:
@@ -113,7 +113,7 @@ namespace p2774 {
 		};
 	public:
 		class handle final {
-			friend race_free;
+			friend object_pool;
 
 			internal::lockfree_stack & owner;
 			node * ptr;
@@ -139,10 +139,10 @@ namespace p2774 {
 			auto get() const noexcept -> T *{ return std::addressof(**this); }
 		};
 
-		race_free(const Allocator & alloc = Allocator{}) noexcept : allocator{alloc} {}
-		race_free(const race_free &) =delete;
-		auto operator=(const race_free &) -> race_free & =delete;
-		~race_free() noexcept {
+		object_pool(const Allocator & alloc = Allocator{}) noexcept : allocator{alloc} {}
+		object_pool(const object_pool &) =delete;
+		auto operator=(const object_pool &) -> object_pool & =delete;
+		~object_pool() noexcept {
 			for(auto ptr{blocks}; ptr;) {
 				auto next{ptr->next};
 				allocator_traits::destroy(allocator, ptr);
