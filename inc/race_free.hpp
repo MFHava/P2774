@@ -127,60 +127,40 @@ namespace p2774 {
 		class handle final {
 			friend race_free;
 
-			internal::lockfree_stack * owner{nullptr};
+			internal::lockfree_stack & owner;
 			node * ptr;
 
-			handle(internal::lockfree_stack * owner, node * ptr) noexcept : owner{owner}, ptr{ptr} {}
+			handle(internal::lockfree_stack & owner, node * ptr) noexcept : owner{owner}, ptr{ptr} {}
 		public:
 			handle(const handle &) =delete;
-			handle(handle && other) noexcept : owner{std::exchange(other.owner, nullptr)}, ptr{other.ptr} {} //moved-from state is valid but unspecified!
+			handle(handle && other) noexcept =delete;
 			auto operator=(const handle &) -> handle & =delete;
-			auto operator=(handle && other) noexcept -> handle & { //moved-from state is valid but unspecified!
-				using std::swap;
-				swap(owner, other.owner);
-				swap(ptr, other.ptr);
-			}
+			auto operator=(handle &&) noexcept -> handle & =delete;
 
 			~handle() noexcept {
-				if(!owner) return;
-
 				//push to stack
-				for(auto old{owner->load()};;) {
+				for(auto old{owner.load()};;) {
 					ptr->next = static_cast<node *>(old.head);
-					if(owner->compare_exchange(old, {ptr, old.tag + 1}))
+					if(owner.compare_exchange(old, {ptr, old.tag + 1}))
 						break; //inserted
 				}
 			}
 
 			explicit
-			operator bool() const noexcept {
-				assert(owner);
-				return ptr->value.has_value();
-			}
+			operator bool() const noexcept { return ptr->value.has_value(); }
 
-			auto operator*() const noexcept -> T & {
-				assert(owner);
-				return *ptr->value;
-			}
-			auto operator->() const noexcept -> T * { return std::addressof(**this); }
+			auto operator*() const noexcept -> T & { return *ptr->value; }
+			auto operator->() const noexcept -> T * { return get(); }
+			auto get() const noexcept -> T *{ return std::addressof(**this); }
 
 			template<typename... Args>
 			requires std::is_constructible_v<T, Args...>
-			auto emplace(Args &&... args) noexcept(std::is_nothrow_constructible_v<T, Args...>) -> T & {
-				assert(owner);
-				return ptr->value.emplace(std::forward<Args>(args)...);
-			}
+			auto emplace(Args &&... args) noexcept(std::is_nothrow_constructible_v<T, Args...>) -> T & { return ptr->value.emplace(std::forward<Args>(args)...); }
 			template<typename U, typename... Args>
 			requires std::is_constructible_v<T, std::initializer_list<U>, Args...>
-			auto emplace(std::initializer_list<U> ilist, Args &&... args) noexcept(std::is_nothrow_constructible_v<T, std::initializer_list<U>, Args...>) -> T & {
-				assert(owner);
-				return ptr->value.emplace(ilist, std::forward<Args>(args)...);
-			}
+			auto emplace(std::initializer_list<U> ilist, Args &&... args) noexcept(std::is_nothrow_constructible_v<T, std::initializer_list<U>, Args...>) -> T & { return ptr->value.emplace(ilist, std::forward<Args>(args)...); }
 
-			void reset() noexcept {
-				assert(owner);
-				ptr->value.reset();
-			}
+			void reset() noexcept { ptr->value.reset(); }
 		};
 
 		race_free(const Allocator & alloc = Allocator{}) noexcept : allocator{alloc} {}
@@ -202,7 +182,7 @@ namespace p2774 {
 			for(; old.head;) {
 retry: //jump here for retry as we already know that head is valid...
 				if(stack.compare_exchange(old, {static_cast<node *>(old.head)->next, old.tag + 1}))
-					return {&stack, static_cast<node *>(old.head)}; //hand ownership to handle
+					return {stack, static_cast<node *>(old.head)}; //hand ownership to handle
 			}
 
 			//may need new node
@@ -228,7 +208,7 @@ retry: //jump here for retry as we already know that head is valid...
 				do { block->nodes[nodes_per_block - 1].next = static_cast<node *>(old.head); }
 				while(!stack.compare_exchange(old, {block->nodes + 1, old.tag + 1}));
 
-				return {&stack, block->nodes}; //we kept the first node for ourselves
+				return {stack, block->nodes}; //we kept the first node for ourselves
 			} catch(...) {
 				allocator_traits::deallocate(allocator, block, 1);
 				throw;
