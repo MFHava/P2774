@@ -149,7 +149,7 @@ namespace p2774 {
 		using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<block>;
 		using allocator_type = typename allocator_traits::allocator_type;
 
-		mutable internal::lockfree_stack stack;
+		mutable internal::lockfree_stack stack;//! @todo second stack for nodes that were created but never used before? (=> re-introduce @c reset to move all nodes to that stack)
 		mutable block * blocks{nullptr};
 		mutable std::binary_semaphore lock{1};
 		[[no_unique_address]] mutable allocator_type allocator;
