@@ -19,18 +19,20 @@ namespace p2774 {
 	class object_pool;
 
 	namespace internal {
+		//! @todo 32bit support?
+		static_assert(sizeof(void *) == 8);
+
+		struct alignas(16) tagged_ptr final {
+			void * head{nullptr};
+			std::uintptr_t tag{0};
+
+			friend
+			auto operator==(const tagged_ptr &, const tagged_ptr &) noexcept -> bool =default;
+		};
+		static_assert(sizeof(tagged_ptr) == 16);
+
 		class lockfree_stack final {
-			//! @todo 32bit support?
-			static_assert(sizeof(void *) == 8);
-
-			mutable struct alignas(16) tagged_ptr final {
-				void * head{nullptr};
-				std::uintptr_t tag{0};
-
-				friend
-				auto operator==(const tagged_ptr &, const tagged_ptr &) noexcept -> bool =default;
-			} top_;
-			static_assert(sizeof(tagged_ptr) == 16);
+			mutable tagged_ptr top_;
 		public:
 			lockfree_stack() noexcept =default;
 			lockfree_stack(const lockfree_stack &) =delete;
@@ -151,6 +153,29 @@ namespace p2774 {
 		mutable block * blocks{nullptr};
 		mutable std::binary_semaphore lock{1};
 		[[no_unique_address]] mutable allocator_type allocator;
+
+		auto allocate_new_block(internal::tagged_ptr old) const -> internal::handle<T> {
+			//only called under lock ... actually need to allocate after all...
+
+			auto block{allocator_traits::allocate(allocator, 1)};
+			try {
+				allocator_traits::construct(allocator, block);
+
+				//register block & link new nodes
+				block->next = blocks;
+				blocks = block;
+				for(std::size_t i{1}; i < internal::nodes_per_block<T>; ++i) block->nodes[i].next = block->nodes + i + 1;
+
+				//insert new nodes into stack
+				do { block->nodes[internal::nodes_per_block<T> - 1].next = static_cast<node *>(old.head); }
+				while(!stack.compare_exchange(old, {block->nodes + 1, old.tag + 1}));
+
+				return {stack, block->nodes}; //we kept the first node for ourselves
+			} catch(...) {
+				allocator_traits::deallocate(allocator, block, 1);
+				throw;
+			}
+		}
 	public:
 		using handle = internal::handle<T>;
 
@@ -183,27 +208,13 @@ retry: //jump here for retry as we already know that head is valid...
 				guard(std::binary_semaphore & lock) noexcept : lock{lock} { lock.acquire(); }
 				~guard() noexcept { lock.release(); }
 			} guard{lock};
-			if((old = stack.load()).head) goto retry; //since trying to acquire lock, memory has become available
 
-			//actually need new node
-			auto block{allocator_traits::allocate(allocator, 1)};
-			try {
-				allocator_traits::construct(allocator, block);
+			//got lock ... get top again to check whether allocation is actually necessary
+			old = stack.load();
+			if(old.head) [[likely]]
+				goto retry; //another thread made object available previously...
 
-				//register block & link new nodes
-				block->next = blocks;
-				blocks = block;
-				for(std::size_t i{1}; i < internal::nodes_per_block<T>; ++i) block->nodes[i].next = block->nodes + i + 1;
-
-				//insert new nodes into stack
-				do { block->nodes[internal::nodes_per_block<T> - 1].next = static_cast<node *>(old.head); }
-				while(!stack.compare_exchange(old, {block->nodes + 1, old.tag + 1}));
-
-				return {stack, block->nodes}; //we kept the first node for ourselves
-			} catch(...) {
-				allocator_traits::deallocate(allocator, block, 1);
-				throw;
-			}
+			return allocate_new_block(old);
 		}
 
 		//! @name Iteration
