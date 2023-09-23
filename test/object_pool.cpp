@@ -22,11 +22,17 @@ TEST_CASE("object_pool", "[object_pool]") {
 		*tls.lease() += val;
 	});
 
-	const auto value{std::accumulate(tls.begin(), tls.end(), std::size_t{0})};
-	REQUIRE(value == reference);
-
-	std::cout << "block count: " << tls.block_count() << "\n";
-	std::cout << "node count: " << tls.node_count() << "\n";
+	std::cout << "available objects: " << tls.size() << "\n";
+	REQUIRE(tls.size() != 0);
+	{
+		auto snapshot{tls.lease_all()};
+		REQUIRE(tls.size() == 0);
+		std::cout << "available objects: " << tls.size() << "\n";
+		const auto value{std::accumulate(snapshot.begin(), snapshot.end(), std::size_t{0})};
+		REQUIRE(value == reference);
+	}
+	REQUIRE(tls.size() != 0);
+	std::cout << "available objects: " << tls.size() << "\n";
 }
 
 //TODO: further tests

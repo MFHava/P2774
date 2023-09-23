@@ -78,11 +78,7 @@ namespace p2774 {
 
 			auto operator++() noexcept -> iterator & {
 				assert(ptr);
-				++index;
-				if(index == internal::nodes_per_block<value_type>) {
-					ptr = ptr->next;
-					index = 0;
-				}
+				ptr = ptr->next;
 				return *this;
 			}
 			auto operator++(int) noexcept -> iterator {
@@ -93,21 +89,20 @@ namespace p2774 {
 
 			auto operator*() const noexcept -> reference {
 				assert(ptr);
-				return ptr->nodes[index].value;
+				return ptr->value;
 			}
 			auto operator->() const noexcept -> pointer { return std::addressof(**this); }
 
 			friend
 			auto operator==(const iterator &, const iterator &) noexcept -> bool =default;
 		private:
-			template<std::default_initializable U, typename Allocator>
+			template<typename T>
 			friend
-			class p2774::object_pool;
+			class snapshot;
 
-			iterator(block<value_type> * ptr) noexcept : ptr{ptr} {}
+			iterator(node<value_type> * ptr) noexcept : ptr{ptr} {}
 
-			block<value_type> * ptr{nullptr};
-			std::size_t index{0};
+			node<value_type> * ptr{nullptr};
 		};
 
 
@@ -139,6 +134,49 @@ namespace p2774 {
 			auto operator*() const noexcept -> T & { return ptr->value; }
 			auto operator->() const noexcept -> T * { return get(); }
 			auto get() const noexcept -> T *{ return std::addressof(**this); }
+		};
+
+
+		template<typename T>
+		class snapshot final {
+			template<std::default_initializable U, typename Allocator>
+			friend
+			class p2774::object_pool;
+
+			internal::lockfree_stack & owner;
+			node<T> * head;
+
+			snapshot(internal::lockfree_stack & owner, node<T> * ptr) noexcept : owner{owner}, head{ptr} {}
+		public:
+			snapshot(const snapshot &) =delete;
+			snapshot(snapshot && other) noexcept =delete;
+			auto operator=(const snapshot &) -> snapshot & =delete;
+			auto operator=(snapshot &&) noexcept -> snapshot & =delete;
+
+			~snapshot() noexcept {
+				auto tail{head};
+				for(; tail->next; tail = tail->next);
+
+				//push list to stack
+				for(auto old{owner.load()};;) {
+					tail->next = static_cast<node<T> *>(old.head);
+					if(owner.compare_exchange(old, {head, old.tag + 1}))
+						break; //inserted
+				}
+			}
+
+			using iterator       = internal::iterator<T>;
+			static_assert(std::forward_iterator<iterator>);
+			using const_iterator = internal::iterator<const T>;
+			static_assert(std::forward_iterator<const_iterator>);
+
+			auto begin() const noexcept -> const_iterator { return head; }
+			auto begin()       noexcept -> iterator { return head; }
+			auto end() const noexcept -> const_iterator { return {}; }
+			auto end()       noexcept -> iterator { return {}; }
+
+			auto cbegin() const noexcept -> const_iterator { return begin(); }
+			auto cend() const noexcept -> const_iterator { return end(); }
 		};
 	}
 
@@ -178,6 +216,7 @@ namespace p2774 {
 		}
 	public:
 		using handle = internal::handle<T>;
+		using snapshot = internal::snapshot<T>;
 
 		object_pool(const Allocator & alloc = Allocator{}) noexcept : allocator{alloc} {}
 		object_pool(const object_pool &) =delete;
@@ -195,7 +234,7 @@ namespace p2774 {
 		auto lease() const -> handle {
 			//pop from stack or allocate new node if stack is empty
 			auto old{stack.load()};
-			for(; old.head;) {
+			while(old.head) {
 retry: //jump here for retry as we already know that head is valid...
 				if(stack.compare_exchange(old, {static_cast<node *>(old.head)->next, old.tag + 1}))
 					return {stack, static_cast<node *>(old.head)}; //hand ownership to handle
@@ -217,35 +256,24 @@ retry: //jump here for retry as we already know that head is valid...
 			return allocate_new_block(old);
 		}
 
-		//! @name Iteration
-		//! @note only yields iterators that actually contain a value!
-		//! @todo can we statically prevent users from calling this whilst there are active handles?!
-		//! @{
-		using iterator       = internal::iterator<T>;
-		static_assert(std::forward_iterator<iterator>);
-		using const_iterator = internal::iterator<const T>;
-		static_assert(std::forward_iterator<const_iterator>);
-
-		auto begin() const noexcept -> const_iterator { return blocks; }
-		auto begin()       noexcept -> iterator { return blocks; }
-		auto end() const noexcept -> const_iterator { return {}; }
-		auto end()       noexcept -> iterator { return {}; }
-
-		auto cbegin() const noexcept -> const_iterator { return begin(); }
-		auto cend() const noexcept -> const_iterator { return end(); }
-		//! @}
-
+		[[nodiscard]]
+		auto lease_all() const noexcept -> snapshot {
+			//swap head of stack with nullptr
+			auto old{stack.load()};
+			while(old.head) {
+				if(stack.compare_exchange(old, {nullptr, old.tag + 1}))
+					break;
+			}
+			//got head or head is nullptr
+			return {stack, static_cast<node *>(old.head)};
+		}
 
 		//! @name Debugging
 		//! @{
-		auto block_count() const noexcept -> std::size_t {
+		auto size() const noexcept -> std::size_t { //not thread-safe!
 			std::size_t count{0};
-			for(auto ptr{blocks}; ptr; ptr = ptr->next) ++count;
+			for(auto ptr{static_cast<node *>(stack.load().head)}; ptr; ptr = ptr->next) ++count;
 			return count;
-		}
-
-		auto node_count() const noexcept -> std::size_t {
-			return block_count() * internal::nodes_per_block<T>;
 		}
 		//! @}
 	};
