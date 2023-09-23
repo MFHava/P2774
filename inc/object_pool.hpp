@@ -96,9 +96,9 @@ namespace p2774 {
 			friend
 			auto operator==(const iterator &, const iterator &) noexcept -> bool =default;
 		private:
-			template<typename T>
+			template<typename, bool>
 			friend
-			class snapshot;
+			class handle;
 
 			iterator(node<value_type> * ptr) noexcept : ptr{ptr} {}
 
@@ -106,8 +106,20 @@ namespace p2774 {
 		};
 
 
+		template<typename T, bool Multiple>
+		struct handle_base {};
+
 		template<typename T>
-		class handle final {
+		struct handle_base<T, true> {
+			using iterator       = internal::iterator<T>;
+			static_assert(std::forward_iterator<iterator>);
+			using const_iterator = internal::iterator<const T>;
+			static_assert(std::forward_iterator<const_iterator>);
+		};
+
+
+		template<typename T, bool Multiple>
+		class handle final : public handle_base<T, Multiple> {
 			template<std::default_initializable U, typename Allocator>
 			friend
 			class p2774::object_pool;
@@ -123,61 +135,30 @@ namespace p2774 {
 			auto operator=(handle &&) noexcept -> handle & =delete;
 
 			~handle() noexcept {
-				//push to stack
+				auto tail{ptr};
+				if constexpr(Multiple)
+					for(; tail->next; tail = tail->next);
+
+				//push list to stack
 				for(auto old{owner.load()};;) {
-					ptr->next = static_cast<node<T> *>(old.head);
+					tail->next = static_cast<node<T> *>(old.head);
 					if(owner.compare_exchange(old, {ptr, old.tag + 1}))
 						break; //inserted
 				}
 			}
 
-			auto operator*() const noexcept -> T & { return ptr->value; }
-			auto operator->() const noexcept -> T * { return get(); }
-			auto get() const noexcept -> T *{ return std::addressof(**this); }
-		};
+			auto operator*() const noexcept -> T & requires (not Multiple) { return ptr->value; }
+			auto operator->() const noexcept -> T * requires (not Multiple) { return get(); }
+			auto get() const noexcept -> T * requires (not Multiple) { return std::addressof(**this); }
 
+			auto begin() const noexcept requires Multiple { return iterator<const T>{ptr}; }
+			auto begin()       noexcept requires Multiple { return iterator<T>{ptr}; }
+			auto end() const noexcept requires Multiple { return iterator<const T>{}; }
+			auto end()       noexcept requires Multiple { return iterator<T>{}; }
 
-		template<typename T>
-		class snapshot final {
-			template<std::default_initializable U, typename Allocator>
-			friend
-			class p2774::object_pool;
-
-			internal::lockfree_stack & owner;
-			node<T> * head;
-
-			snapshot(internal::lockfree_stack & owner, node<T> * ptr) noexcept : owner{owner}, head{ptr} {}
-		public:
-			snapshot(const snapshot &) =delete;
-			snapshot(snapshot && other) noexcept =delete;
-			auto operator=(const snapshot &) -> snapshot & =delete;
-			auto operator=(snapshot &&) noexcept -> snapshot & =delete;
-
-			~snapshot() noexcept {
-				auto tail{head};
-				for(; tail->next; tail = tail->next);
-
-				//push list to stack
-				for(auto old{owner.load()};;) {
-					tail->next = static_cast<node<T> *>(old.head);
-					if(owner.compare_exchange(old, {head, old.tag + 1}))
-						break; //inserted
-				}
-			}
-
-			using iterator       = internal::iterator<T>;
-			static_assert(std::forward_iterator<iterator>);
-			using const_iterator = internal::iterator<const T>;
-			static_assert(std::forward_iterator<const_iterator>);
-
-			auto begin() const noexcept -> const_iterator { return head; }
-			auto begin()       noexcept -> iterator { return head; }
-			auto end() const noexcept -> const_iterator { return {}; }
-			auto end()       noexcept -> iterator { return {}; }
-
-			auto cbegin() const noexcept -> const_iterator { return begin(); }
-			auto cend() const noexcept -> const_iterator { return end(); }
-		};
+			auto cbegin() const noexcept requires Multiple { return begin(); }
+			auto cend() const noexcept requires Multiple { return end(); }
+		};;
 	}
 
 	template<std::default_initializable T, typename Allocator = std::allocator<T>>
@@ -192,7 +173,7 @@ namespace p2774 {
 		mutable std::binary_semaphore lock{1};
 		[[no_unique_address]] mutable allocator_type allocator;
 
-		auto allocate_new_block(internal::tagged_ptr old) const -> internal::handle<T> {
+		auto allocate_new_block(internal::tagged_ptr old) const -> internal::handle<T, false> {
 			//only called under lock ... actually need to allocate after all...
 
 			auto block{allocator_traits::allocate(allocator, 1)};
@@ -215,8 +196,8 @@ namespace p2774 {
 			}
 		}
 	public:
-		using handle = internal::handle<T>;
-		using snapshot = internal::snapshot<T>;
+		using single_handle = internal::handle<T, false>;
+		using multi_handle = internal::handle<T, true>;
 
 		object_pool(const Allocator & alloc = Allocator{}) noexcept : allocator{alloc} {}
 		object_pool(const object_pool &) =delete;
@@ -231,7 +212,7 @@ namespace p2774 {
 		}
 
 		[[nodiscard]]
-		auto lease() const -> handle {
+		auto lease() const -> single_handle {
 			//pop from stack or allocate new node if stack is empty
 			auto old{stack.load()};
 			while(old.head) {
@@ -257,7 +238,7 @@ retry: //jump here for retry as we already know that head is valid...
 		}
 
 		[[nodiscard]]
-		auto lease_all() const noexcept -> snapshot {
+		auto lease_all() const noexcept -> multi_handle {
 			//swap head of stack with nullptr
 			auto old{stack.load()};
 			while(old.head) {
