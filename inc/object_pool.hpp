@@ -96,7 +96,7 @@ namespace p2774 {
 			friend
 			auto operator==(const iterator &, const iterator &) noexcept -> bool =default;
 		private:
-			template<typename T>
+			template<typename>
 			friend
 			class snapshot;
 
@@ -108,7 +108,7 @@ namespace p2774 {
 
 		template<typename T>
 		class handle final {
-			template<std::default_initializable U, typename Allocator>
+			template<std::default_initializable, typename>
 			friend
 			class p2774::object_pool;
 
@@ -139,7 +139,7 @@ namespace p2774 {
 
 		template<typename T>
 		class snapshot final {
-			template<std::default_initializable U, typename Allocator>
+			template<std::default_initializable, typename>
 			friend
 			class p2774::object_pool;
 
@@ -187,12 +187,13 @@ namespace p2774 {
 		using allocator_traits = std::allocator_traits<Allocator>::template rebind_traits<block>;
 		using allocator_type = typename allocator_traits::allocator_type;
 
-		mutable internal::lockfree_stack stack;//! @todo second stack for nodes that were created but never used before? (=> re-introduce @c reset to move all nodes to that stack)
+		mutable internal::lockfree_stack active, reserved;
+
 		mutable block * blocks{nullptr};
 		mutable std::binary_semaphore lock{1};
 		[[no_unique_address]] mutable allocator_type allocator;
 
-		auto allocate_new_block(internal::tagged_ptr old) const -> internal::handle<T> {
+		auto allocate_new_block() const -> internal::handle<T> {
 			//only called under lock ... actually need to allocate after all...
 
 			auto block{allocator_traits::allocate(allocator, 1)};
@@ -205,10 +206,13 @@ namespace p2774 {
 				for(std::size_t i{1}; i < internal::nodes_per_block<T>; ++i) block->nodes[i].next = block->nodes + i + 1;
 
 				//insert new nodes into stack
-				do { block->nodes[internal::nodes_per_block<T> - 1].next = static_cast<node *>(old.head); }
-				while(!stack.compare_exchange(old, {block->nodes + 1, old.tag + 1}));
+				for(auto old{reserved.load()};;) {
+					block->nodes[internal::nodes_per_block<T> - 1].next = static_cast<node *>(old.head);
+					if(reserved.compare_exchange(old, {block->nodes + 1, old.tag + 1}))
+						break;
+				}
 
-				return {stack, block->nodes}; //we kept the first node for ourselves
+				return {active, block->nodes}; //we kept the first node for ourselves
 			} catch(...) {
 				allocator_traits::deallocate(allocator, block, 1);
 				throw;
@@ -233,12 +237,16 @@ namespace p2774 {
 		[[nodiscard]]
 		auto lease() const -> handle {
 			//pop from stack or allocate new node if stack is empty
-			auto old{stack.load()};
-			while(old.head) {
-retry: //jump here for retry as we already know that head is valid...
-				if(stack.compare_exchange(old, {static_cast<node *>(old.head)->next, old.tag + 1}))
-					return {stack, static_cast<node *>(old.head)}; //hand ownership to handle
-			}
+retry:
+			//check for reusable node
+			for(auto old{active.load()}; old.head;)
+				if(active.compare_exchange(old, {static_cast<node *>(old.head)->next, old.tag + 1}))
+					return {active, static_cast<node *>(old.head)}; //hand ownership to handle
+
+			//check reserved nodes
+			for(auto old{reserved.load()}; old.head;)
+				if(reserved.compare_exchange(old, {static_cast<node *>(old.head)->next, old.tag + 1}))
+					return {active, static_cast<node *>(old.head)}; //hand ownership to handle, object is now considered active...
 
 			//may need new node
 			const class guard final {
@@ -249,30 +257,39 @@ retry: //jump here for retry as we already know that head is valid...
 			} guard{lock};
 
 			//got lock ... get top again to check whether allocation is actually necessary
-			old = stack.load();
-			if(old.head) [[likely]]
-				goto retry; //another thread made object available previously...
+			if(active.load().head || reserved.load().head) [[likely]]
+				goto retry; //another thread made object(s) available previously...
 
-			return allocate_new_block(old);
+			return allocate_new_block();
 		}
 
 		[[nodiscard]]
 		auto lease_all() const noexcept -> snapshot {
 			//swap head of stack with nullptr
-			auto old{stack.load()};
+			auto old{active.load()};
 			while(old.head) {
-				if(stack.compare_exchange(old, {nullptr, old.tag + 1}))
+				if(active.compare_exchange(old, {nullptr, old.tag + 1}))
 					break;
 			}
 			//got head or head is nullptr
-			return {stack, static_cast<node *>(old.head)};
+			return {active, static_cast<node *>(old.head)};
 		}
 
 		//! @name Debugging
 		//! @{
-		auto size() const noexcept -> std::size_t { //not thread-safe!
+		auto active_node_count() const noexcept -> std::size_t { //not thread-safe!
 			std::size_t count{0};
-			for(auto ptr{static_cast<node *>(stack.load().head)}; ptr; ptr = ptr->next) ++count;
+			for(auto ptr{static_cast<node *>(active.load().head)}; ptr; ptr = ptr->next) ++count;
+			return count;
+		}
+		auto reserved_node_count() const noexcept -> std::size_t { //not thread-safe!
+			std::size_t count{0};
+			for(auto ptr{static_cast<node *>(reserved.load().head)}; ptr; ptr = ptr->next) ++count;
+			return count;
+		}
+		auto block_count() const noexcept -> std::size_t { //not thread-safe!
+			std::size_t count{0};
+			for(auto ptr{blocks}; ptr; ptr = ptr->next) ++count;
 			return count;
 		}
 		//! @}

@@ -11,6 +11,14 @@
 #include <catch.hpp>
 #include <object_pool.hpp>
 
+namespace {
+	void print(const auto & pool) {
+		std::cout << "active nodes:   " << pool.active_node_count() << "\n";
+		std::cout << "reserved nodes: " << pool.reserved_node_count() << "\n";
+		std::cout << "blocks:         " << pool.block_count() << "\n\n";
+	}
+}
+
 TEST_CASE("object_pool", "[object_pool]") {
 	std::vector<std::size_t> values(1'000'000);
 	std::iota(std::begin(values), std::end(values), 0);
@@ -22,17 +30,17 @@ TEST_CASE("object_pool", "[object_pool]") {
 		*tls.lease() += val;
 	});
 
-	std::cout << "available objects: " << tls.size() << "\n";
-	REQUIRE(tls.size() != 0);
+	print(tls);
+	REQUIRE(tls.active_node_count() != 0);
 	{
 		auto snapshot{tls.lease_all()};
-		REQUIRE(tls.size() == 0);
-		std::cout << "available objects: " << tls.size() << "\n";
+		REQUIRE(tls.active_node_count() == 0);
+		print(tls);
 		const auto value{std::accumulate(snapshot.begin(), snapshot.end(), std::size_t{0})};
 		REQUIRE(value == reference);
 	}
-	REQUIRE(tls.size() != 0);
-	std::cout << "available objects: " << tls.size() << "\n";
+	REQUIRE(tls.active_node_count() != 0);
+	print(tls);
 }
 
 //TODO: further tests
